@@ -34,3 +34,20 @@ def mcast_sender(ttl=1):
         socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("b", ttl)
     )
     return send_sock
+
+
+def is_greater_than(p1, p2):
+    """
+    Compare two proposal IDs (count, proposer_id).
+    Returns True if p1 > p2, False otherwise.
+    Compare counts first, use proposer_id as tiebreaker.
+    """
+    count1, pid1 = p1
+    count2, pid2 = p2
+    
+    if count1 > count2:
+        return True
+    elif count1 == count2:
+        return pid1 > pid2
+    else:
+        return False
