@@ -1,7 +1,7 @@
 import sys
 import logging
 import json
-from utils import mcast_receiver, mcast_sender
+from utils import mcast_receiver
 
 
 class Learner:
@@ -10,79 +10,37 @@ class Learner:
         self.id = id
         self.r = mcast_receiver(config["learners"])
         
-        # Learner state
-        self.n_acceptors = 3  # Fixed number of acceptors
-        self.quorum_size = (self.n_acceptors // 2) + 1  # Majority
-        self.accepted_proposals = {}  # {instance: {proposal_id: {acceptor_id: value}}}
-        self.learned_values = {}  # {instance: value} Learned values per instance
-        
-        # Lamport logical clock
-        self.logical_clock = 0
+        # Synod state
+        self.quorum_size = 2  # Majority of 3 acceptors
+        self.accepted = {}  # {v_rnd: {acceptor_id: v_val}}
+        self.learned = False
 
     def run(self):
         logging.debug(f"-> learner {self.id}")
-        while True:
-            msg, addr = self.r.recvfrom(2**16)
+        while not self.learned:
+            msg, _ = self.r.recvfrom(2**16)
+            data = json.loads(msg.decode())
             
-            try:
-                data = json.loads(msg.decode())
-                msg_type = data.get("type")
-                
-                if msg_type == "accepted":
-                    self.handle_accepted(data)
-                else:
-                    logging.debug(f"Unknown message type: {msg_type}")
-                    
-            except json.JSONDecodeError:
-                logging.debug(f"Received non-JSON message: {msg.decode()}")
+            if data.get("type") == "accepted":
+                self.handle_accepted(data)
 
     def handle_accepted(self, data):
-        """
-        Phase 3: upon receiving (PHASE 2B, v-rnd, v-val) from Qa
-        if for all received messages: v-rnd = c-rnd then
-            send (DECISION, v-val) to learners
-        
-        In practice, learners collect ACCEPTED messages and learn when
-        a quorum of acceptors have accepted the same (v-rnd, v-val)
-        """
-        # LC2(b): Update logical clock based on received timestamp
-        if "timestamp" in data:
-            self.logical_clock = max(self.logical_clock, data["timestamp"])
-        
-        # LC1: Increment before timestamping this receive event
-        self.logical_clock += 1
-        
-        instance = data["instance"]
+        """Learn when quorum accepts same (v_rnd, v_val)"""
         v_rnd = tuple(data["v_rnd"])
         acceptor_id = data["acceptor_id"]
         v_val = data["v_val"]
         
-        logging.debug(f"Received ACCEPTED (Phase 2B) from acceptor {acceptor_id} for instance {instance} v-rnd {v_rnd} with v-val {v_val}")
+        if v_rnd not in self.accepted:
+            self.accepted[v_rnd] = {}
         
-        # Skip if we've already learned this instance
-        if instance in self.learned_values:
-            return
+        self.accepted[v_rnd][acceptor_id] = v_val
         
-        # Track this acceptance
-        if instance not in self.accepted_proposals:
-            self.accepted_proposals[instance] = {}
-        if v_rnd not in self.accepted_proposals[instance]:
-            self.accepted_proposals[instance][v_rnd] = {}
-        
-        self.accepted_proposals[instance][v_rnd][acceptor_id] = v_val
-        
-        # Check if we have a quorum (Qa) for this v-rnd
-        if len(self.accepted_proposals[instance][v_rnd]) >= self.quorum_size:
-            # Check that all acceptors in quorum agreed on same v-val
-            values = list(self.accepted_proposals[instance][v_rnd].values())
-            if len(set(values)) == 1:  # All same value
-                learned_value = values[0]
-                
-                # Mark as learned and output (DECISION)
-                self.learned_values[instance] = learned_value
-                logging.debug(f"LEARNED (DECISION): v-val {learned_value} for instance {instance} (v-rnd {v_rnd})")
-                print(learned_value)
+        # Check for quorum
+        if len(self.accepted[v_rnd]) >= self.quorum_size:
+            values = list(self.accepted[v_rnd].values())
+            if len(set(values)) == 1:
+                logging.debug(f"LEARNED: {values[0]}")
+                print(values[0])
                 sys.stdout.flush()
-            else:
-                logging.warning(f"Quorum Qa reached for instance {instance} but acceptors have different v-val!")
+                self.learned = True
 
