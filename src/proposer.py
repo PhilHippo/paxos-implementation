@@ -12,14 +12,17 @@ class Proposer:
         self.r = mcast_receiver(config["proposers"])
         self.s = mcast_sender()
         
-        # Proposer state per instance
+        # Proposer state per instance (following Paxos notation)
         self.instance_num = 0  # Current instance number
-        self.proposal_count = {}  # {instance: count} Counter for proposal numbers per instance
-        self.current_value = {}  # {instance: value} Value to propose per instance
-        self.promises_received = {}  # {instance: {acceptor_id: (accepted_id, accepted_value)}}
+        self.c_rnd = {}  # {instance: round_number} highest-numbered round started
+        self.c_val = {}  # {instance: value} value picked for round c-rnd
+        self.promises_received = {}  # {instance: {acceptor_id: (v_rnd, v_val)}}
         self.phase = {}  # {instance: 'prepare' or 'accept'}
         self.n_acceptors = 3  # Fixed number of acceptors
-        self.quorum_size = (self.n_acceptors // 2) + 1  # Majority
+        self.quorum_size = (self.n_acceptors // 2) + 1  # Majority (Qa)
+        
+        # Lamport logical clock for round numbers
+        self.logical_clock = 0
         
         # Timeout settings
         self.timeout = 1.0  # seconds
@@ -49,11 +52,12 @@ class Proposer:
                     if isinstance(data, dict):
                         msg_type = data.get("type")
                         
-                        # Handle promise and accepted messages
+                        # Handle promise messages
                         if msg_type == "promise":
-                            self.handle_promise(data)
-                        elif msg_type == "accepted":
-                            self.handle_accepted(data)
+                            # Get the expected c-rnd for this instance
+                            instance = data.get("instance")
+                            if instance in self.c_rnd:
+                                self.handle_promise(data, self.c_rnd[instance])
                         else:
                             logging.debug(f"Unknown message type: {msg_type}")
                     else:
@@ -69,30 +73,38 @@ class Proposer:
                     self.pending_values.append(value)
 
     def propose(self, instance, value):
-        """Start a new proposal for the given value in the given instance"""
-        self.current_value[instance] = value
-        if instance not in self.proposal_count:
-            self.proposal_count[instance] = 0
-        self.proposal_count[instance] += 1
+        """
+        Phase 1A: To propose value v:
+        - increase c-rnd to an arbitrary unique value
+        - send (PHASE 1A, c-rnd) to acceptors
+        """
+        # Increment logical clock to get unique round number
+        self.logical_clock += 1
+        
+        # Set c-rnd and c-val for this instance
+        c_rnd = (self.logical_clock, self.id)
+        self.c_rnd[instance] = c_rnd
+        self.c_val[instance] = value
+        
         self.promises_received[instance] = {}
         self.phase[instance] = 'prepare'
         
-        # Phase 1a: Send PREPARE message
-        proposal_id = (self.proposal_count[instance], self.id)
+        # Phase 1A: Send PREPARE (c-rnd) to acceptors
         prepare_msg = {
             "type": "prepare",
             "instance": instance,
-            "proposal_id": list(proposal_id)  # Convert tuple to list for JSON
+            "c_rnd": list(c_rnd),  # Convert tuple to list for JSON
+            "timestamp": self.logical_clock  # LC2(a): piggyback logical clock
         }
         
-        logging.debug(f"Phase 1a: Sending PREPARE for instance {instance} with proposal_id {proposal_id}")
+        logging.debug(f"Phase 1A: Sending PREPARE for instance {instance} with c-rnd {c_rnd}")
         self.s.sendto(json.dumps(prepare_msg).encode(), self.config["acceptors"])
         
         # Wait for promises with timeout
-        self.wait_for_phase1b(instance)
+        self.wait_for_phase1b(instance, c_rnd)
 
-    def wait_for_phase1b(self, instance):
-        """Wait for promise messages from acceptors"""
+    def wait_for_phase1b(self, instance, c_rnd):
+        """Wait for Phase 1B promise messages from acceptors"""
         timeout_remaining = self.timeout
         start_wait = time.time()
         
@@ -101,7 +113,7 @@ class Proposer:
             
             if not ready:
                 # Timeout occurred
-                logging.debug(f"Timeout in Phase 1b for instance {instance}, only {len(self.promises_received[instance])} promises received")
+                logging.debug(f"Timeout in Phase 1B for instance {instance}, only {len(self.promises_received[instance])} promises received")
                 self.handle_timeout(instance)
                 return
             
@@ -114,7 +126,7 @@ class Proposer:
                     msg_type = data.get("type")
                     
                     if msg_type == "promise":
-                        self.handle_promise(data)
+                        self.handle_promise(data, c_rnd)
                     elif msg_type == "accepted":
                         # Ignore accepted messages during phase 1b
                         pass
@@ -135,78 +147,105 @@ class Proposer:
             
             timeout_remaining = self.timeout - (time.time() - start_wait)
 
-    def handle_promise(self, data):
-        """Handle PROMISE message from acceptor"""
+    def handle_promise(self, data, expected_c_rnd):
+        """
+        Phase 1B: upon receiving (PHASE 1B, rnd, v-rnd, v-val) from Qa such that c-rnd = rnd
+        - k ← largest v-rnd value received
+        - V ← set of (v-rnd, v-val) received with v-rnd = k
+        - if k = 0 then let c-val be v
+        - else c-val ← the only v-val in V
+        - send (PHASE 2A, c-rnd, c-val) to acceptors
+        """
         instance = data["instance"]
         
         if instance not in self.phase or self.phase[instance] != 'prepare':
             return
         
-        proposal_id = tuple(data["proposal_id"])
+        # LC2(b): Update logical clock based on received timestamp
+        if "timestamp" in data:
+            self.logical_clock = max(self.logical_clock, data["timestamp"])
+        
+        # LC1: Increment before timestamping this receive event
+        self.logical_clock += 1
+        
+        rnd = tuple(data["rnd"])
         acceptor_id = data["acceptor_id"]
-        accepted_id = tuple(data["accepted_id"]) if data["accepted_id"] else None
-        accepted_value = data["accepted_value"]
+        v_rnd = tuple(data["v_rnd"]) if data["v_rnd"] else None
+        v_val = data["v_val"]
         
-        logging.debug(f"Received PROMISE from acceptor {acceptor_id} for instance {instance} proposal {proposal_id}")
+        logging.debug(f"Received PROMISE (Phase 1B) from acceptor {acceptor_id} for instance {instance} rnd {rnd}, v-rnd {v_rnd}, v-val {v_val}")
         
-        # Check if this promise is for our current proposal
-        current_proposal = (self.proposal_count[instance], self.id)
-        if proposal_id != current_proposal:
-            logging.debug(f"Promise for different proposal, ignoring")
+        # Check if this promise is for our current round (c-rnd = rnd)
+        if rnd != expected_c_rnd:
+            logging.debug(f"Promise for different round, ignoring")
             return
         
-        # Store the promise
-        self.promises_received[instance][acceptor_id] = (accepted_id, accepted_value)
+        # Store the promise with (v-rnd, v-val)
+        self.promises_received[instance][acceptor_id] = (v_rnd, v_val)
         
-        # Check if we have a quorum
+        # Check if we have a quorum (Qa)
         if len(self.promises_received[instance]) >= self.quorum_size:
-            logging.debug(f"Quorum reached with {len(self.promises_received[instance])} promises for instance {instance}")
-            self.start_phase2(instance)
+            logging.debug(f"Quorum Qa reached with {len(self.promises_received[instance])} promises for instance {instance}")
+            self.start_phase2(instance, expected_c_rnd)
 
-    def start_phase2(self, instance):
-        """Phase 2a: Send ACCEPT message"""
+    def start_phase2(self, instance, c_rnd):
+        """
+        Phase 2A: Send ACCEPT message
+        - k ← largest v-rnd value received
+        - V ← set of (v-rnd, v-val) received with v-rnd = k
+        - if k = 0 then let c-val be v (original value)
+        - else c-val ← the only v-val in V
+        - send (PHASE 2A, c-rnd, c-val) to acceptors
+        """
         self.phase[instance] = 'accept'
         
-        # Determine value to propose
-        # If any acceptor has accepted a value, use the one with highest proposal ID
-        max_accepted_id = None
-        value_to_propose = self.current_value[instance]
+        # Find k = largest v-rnd value received
+        k = None
+        for acceptor_id, (v_rnd, v_val) in self.promises_received[instance].items():
+            if v_rnd is not None:
+                if k is None or is_greater_than(v_rnd, k):
+                    k = v_rnd
         
-        for acceptor_id, (accepted_id, accepted_value) in self.promises_received[instance].items():
-            if accepted_id is not None:
-                if max_accepted_id is None or is_greater_than(accepted_id, max_accepted_id):
-                    max_accepted_id = accepted_id
-                    value_to_propose = accepted_value
+        # Build set V of (v-rnd, v-val) with v-rnd = k
+        if k is None:
+            # k = 0 (no acceptor has voted), use original value
+            c_val = self.c_val[instance]
+        else:
+            # Get the only v-val in V where v-rnd = k
+            V = {}
+            for acceptor_id, (v_rnd, v_val) in self.promises_received[instance].items():
+                if v_rnd == k:
+                    V[acceptor_id] = v_val
+            
+            # c-val ← the only v-val in V
+            values = list(V.values())
+            c_val = values[0]  # Should all be the same
+            self.c_val[instance] = c_val
         
-        proposal_id = (self.proposal_count[instance], self.id)
+        # LC1: Increment logical clock before sending
+        self.logical_clock += 1
+        
+        # Phase 2A: Send (PHASE 2A, c-rnd, c-val) to acceptors
         accept_msg = {
             "type": "accept",
             "instance": instance,
-            "proposal_id": list(proposal_id),  # Convert tuple to list for JSON
-            "value": value_to_propose
+            "c_rnd": list(c_rnd),  # Convert tuple to list for JSON
+            "c_val": c_val,
+            "timestamp": self.logical_clock  # LC2(a): piggyback logical clock
         }
         
-        logging.debug(f"Phase 2a: Sending ACCEPT for instance {instance} with proposal_id {proposal_id} and value {value_to_propose}")
+        logging.debug(f"Phase 2A: Sending ACCEPT for instance {instance} with c-rnd {c_rnd} and c-val {c_val}")
         self.s.sendto(json.dumps(accept_msg).encode(), self.config["acceptors"])
         
-        # Reset phase (proposer's job is done after sending accept)
+        # Proposer's job is done - mark instance as complete
         self.phase[instance] = None
-
-    def handle_accepted(self, data):
-        """Handle ACCEPTED message from acceptor (optional, for logging)"""
-        instance = data["instance"]
-        proposal_id = tuple(data["proposal_id"])
-        acceptor_id = data["acceptor_id"]
-        value = data["value"]
-        
-        logging.debug(f"Acceptor {acceptor_id} accepted proposal {proposal_id} for instance {instance} with value {value}")
 
     def handle_timeout(self, instance):
-        """Handle timeout by restarting with a higher proposal number"""
+        """Handle timeout by restarting with a higher round number"""
         logging.debug(f"Timeout occurred for instance {instance}, restarting proposal")
-        # Reset phase and restart the proposal with incremented count
+        # Reset phase and restart the proposal with incremented round
         self.phase[instance] = None
-        if instance in self.current_value:
-            self.propose(instance, self.current_value[instance])
+        if instance in self.c_val:
+            self.propose(instance, self.c_val[instance])
 
 

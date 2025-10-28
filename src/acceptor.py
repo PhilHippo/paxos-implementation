@@ -10,10 +10,13 @@ class Acceptor:
         self.r = mcast_receiver(config["acceptors"])
         self.s = mcast_sender()
         
-        # Acceptor state per instance
-        self.promised_id = {}  # {instance: (count, proposer_id)} Highest proposal ID promised
-        self.accepted_id = {}  # {instance: (count, proposer_id)} Highest proposal ID accepted
-        self.accepted_value = {}  # {instance: value} Value of the accepted proposal
+        # Acceptor state per instance (following Paxos notation)
+        self.rnd = {}  # {instance: round} highest-numbered round participated in, initially 0
+        self.v_rnd = {}  # {instance: round} highest-numbered round cast a vote, initially 0
+        self.v_val = {}  # {instance: value} value voted in round v-rnd, initially null
+        
+        # Lamport logical clock
+        self.logical_clock = 0
 
     def run(self):
         logging.info(f"-> acceptor {self.id}")
@@ -35,59 +38,98 @@ class Acceptor:
                 logging.debug(f"Received non-JSON message: {msg.decode()}")
 
     def handle_prepare(self, data):
-        """Handle PREPARE message (Phase 1a)"""
+        """
+        Phase 1B: upon receiving (PHASE 1A, c-rnd) from proposer
+        if c-rnd > rnd then
+            rnd ← c-rnd
+            send (PHASE 1B, rnd, v-rnd, v-val) to proposer
+        """
+        # LC2(b): Update logical clock based on received timestamp
+        if "timestamp" in data:
+            self.logical_clock = max(self.logical_clock, data["timestamp"])
+        
+        # LC1: Increment before timestamping this receive event
+        self.logical_clock += 1
+        
         instance = data["instance"]
-        proposal_id = tuple(data["proposal_id"])
+        c_rnd = tuple(data["c_rnd"])
         
-        logging.debug(f"Received PREPARE for instance {instance} with proposal_id {proposal_id}")
+        logging.debug(f"Received PREPARE (Phase 1A) for instance {instance} with c-rnd {c_rnd}")
         
-        # Check if we should promise
-        if instance not in self.promised_id or is_greater_than(proposal_id, self.promised_id[instance]):
-            # Update promised_id
-            self.promised_id[instance] = proposal_id
+        # Get current rnd for this instance (default 0 means no round yet)
+        current_rnd = self.rnd.get(instance, (0, 0))
+        
+        # Check if c-rnd > rnd
+        if is_greater_than(c_rnd, current_rnd):
+            # Update rnd ← c-rnd
+            self.rnd[instance] = c_rnd
             
-            # Phase 1b: Send PROMISE back to proposer
+            # LC1: Increment before sending
+            self.logical_clock += 1
+            
+            # Phase 1B: Send (PHASE 1B, rnd, v-rnd, v-val) to proposer
             promise_msg = {
                 "type": "promise",
                 "instance": instance,
-                "proposal_id": list(proposal_id),
+                "rnd": list(c_rnd),
                 "acceptor_id": self.id,
-                "accepted_id": list(self.accepted_id[instance]) if instance in self.accepted_id else None,
-                "accepted_value": self.accepted_value.get(instance)
+                "v_rnd": list(self.v_rnd[instance]) if instance in self.v_rnd else None,
+                "v_val": self.v_val.get(instance),
+                "timestamp": self.logical_clock  # LC2(a): piggyback logical clock
             }
             
-            logging.debug(f"Sending PROMISE for instance {instance} proposal_id {proposal_id}")
+            logging.debug(f"Sending PROMISE (Phase 1B) for instance {instance} rnd {c_rnd}, v-rnd {self.v_rnd.get(instance)}, v-val {self.v_val.get(instance)}")
             self.s.sendto(json.dumps(promise_msg).encode(), self.config["proposers"])
         else:
-            logging.debug(f"Rejecting PREPARE for instance {instance} (already promised to {self.promised_id[instance]})")
+            logging.debug(f"Rejecting PREPARE for instance {instance} (c-rnd {c_rnd} not > rnd {current_rnd})")
 
     def handle_accept(self, data):
-        """Handle ACCEPT message (Phase 2a)"""
+        """
+        Phase 2B: upon receiving (PHASE 2A, c-rnd, c-val) from proposer
+        if c-rnd >= rnd then
+            v-rnd ← c-rnd
+            v-val ← c-val
+            send (PHASE 2B, v-rnd, v-val) to proposer
+        """
+        # LC2(b): Update logical clock based on received timestamp
+        if "timestamp" in data:
+            self.logical_clock = max(self.logical_clock, data["timestamp"])
+        
+        # LC1: Increment before timestamping this receive event
+        self.logical_clock += 1
+        
         instance = data["instance"]
-        proposal_id = tuple(data["proposal_id"])
-        value = data["value"]
+        c_rnd = tuple(data["c_rnd"])
+        c_val = data["c_val"]
         
-        logging.debug(f"Received ACCEPT for instance {instance} with proposal_id {proposal_id} and value {value}")
+        logging.debug(f"Received ACCEPT (Phase 2A) for instance {instance} with c-rnd {c_rnd} and c-val {c_val}")
         
-        # Check if we should accept
-        # Accept if proposal_id >= promised_id (we promised not to accept lower)
-        if instance not in self.promised_id or not is_greater_than(self.promised_id[instance], proposal_id):
-            # Accept the proposal
-            self.promised_id[instance] = proposal_id
-            self.accepted_id[instance] = proposal_id
-            self.accepted_value[instance] = value
+        # Get current rnd for this instance (default 0 means no round yet)
+        current_rnd = self.rnd.get(instance, (0, 0))
+        
+        # Check if c-rnd >= rnd (accept if not strictly less than)
+        if not is_greater_than(current_rnd, c_rnd):
+            # Accept the proposal: v-rnd ← c-rnd, v-val ← c-val
+            self.rnd[instance] = c_rnd
+            self.v_rnd[instance] = c_rnd
+            self.v_val[instance] = c_val
             
-            # Phase 2b: Send ACCEPTED to learners
+            # LC1: Increment before sending
+            self.logical_clock += 1
+            
+            # Phase 2B: Send (PHASE 2B, v-rnd, v-val) to learners
+            # Note: Original algorithm sends to proposer, but Multi-Paxos sends to learners
             accepted_msg = {
                 "type": "accepted",
                 "instance": instance,
-                "proposal_id": list(proposal_id),
+                "v_rnd": list(c_rnd),
                 "acceptor_id": self.id,
-                "value": value
+                "v_val": c_val,
+                "timestamp": self.logical_clock  # LC2(a): piggyback logical clock
             }
             
-            logging.debug(f"Accepted proposal {proposal_id} for instance {instance} with value {value}, sending to learners")
+            logging.debug(f"Accepted c-rnd {c_rnd} for instance {instance} with c-val {c_val}, sending to learners")
             self.s.sendto(json.dumps(accepted_msg).encode(), self.config["learners"])
         else:
-            logging.debug(f"Rejecting ACCEPT for instance {instance} (promised to higher proposal {self.promised_id[instance]})")
+            logging.debug(f"Rejecting ACCEPT for instance {instance} (c-rnd {c_rnd} not >= rnd {current_rnd})")
 

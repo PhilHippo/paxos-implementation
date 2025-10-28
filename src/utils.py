@@ -38,16 +38,21 @@ def mcast_sender(ttl=1):
 
 def is_greater_than(p1, p2):
     """
-    Compare two proposal IDs (count, proposer_id).
+    Compare two proposal IDs (timestamp, proposer_id) using totally ordered logical clocks.
     Returns True if p1 > p2, False otherwise.
-    Compare counts first, use proposer_id as tiebreaker.
-    """
-    count1, pid1 = p1
-    count2, pid2 = p2
     
-    if count1 > count2:
+    Implements total ordering: (T1, id1) > (T2, id2) iff:
+      (a) T1 > T2, or
+      (b) T1 == T2 and id1 > id2
+    
+    This ensures proposal IDs have a total order based on Lamport logical clocks.
+    """
+    timestamp1, pid1 = p1
+    timestamp2, pid2 = p2
+    
+    if timestamp1 > timestamp2:
         return True
-    elif count1 == count2:
+    elif timestamp1 == timestamp2:
         return pid1 > pid2
     else:
         return False
