@@ -36,7 +36,7 @@ class Proposer:
                     msg_1A = pickle.dumps(["1A", self.c_rnd])
                     self.value = msg[1]
                     self.s.sendto(msg_1A, self.config["acceptors"])
-                    logging.debug(f"Sending {msg_1A} to acceptors")
+                    logging.debug(f"Sending {pickle.loads(msg_1A)} to acceptors")
                 case "1B":
                     rnd, v_rnd, v_val = msg[1:]
                     if rnd == self.c_rnd:
@@ -48,20 +48,18 @@ class Proposer:
                             else:
                                 c_val = V
                         
-                            self.quorum_1B = []
                             msg_2A = pickle.dumps(["2A", self.c_rnd, c_val])
                             self.s.sendto(msg_2A, self.config["acceptors"])
-                            logging.debug(f"Sending {msg_2A} to acceptors")
+                            logging.debug(f"Sending {pickle.loads(msg_2A)} to acceptors")
 
                 case "2B":
                     v_rnd, v_val = msg[1:]
                     if v_rnd == self.c_rnd:
                         self.quorum_2B.append((v_rnd, v_val))
                         if len(self.quorum_2B) == self.majority_acceptors:
-                            msg_2B = pickle.dumps(["Decision", v_val])
-                            self.s.sendto(msg_2B, self.config["learners"])
-                            logging.debug(f"Sending {msg_2B} to learners")
-                            self.quorum_2B = []
+                            msg_3 = pickle.dumps(["Decision", v_val])
+                            self.s.sendto(msg_3, self.config["learners"])
+                            logging.debug(f"Sending {pickle.loads(msg_3)} to learners")
                 case _:
                     logging.error(f"Unknown message: {msg}")
                     break

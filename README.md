@@ -1,65 +1,60 @@
-# Paxos Atomic Broadcast Implementation
+# Distributed Algorithms: Paxos implementation
 
-This repository contains an implementation of the Paxos protocol to solve atomic broadcast in an asynchronous system. This project was developed for the Distributed Algorithms course (Autumn 2025) at the Università della Svizzera italiana (USI).
+The implementation is accomplished through three milestones:
+1) Synod algorithm
+2) Multi Paxos
+3) Optimizations
 
-## Project Overview
+## Dependencies and preliminaries
 
-The goal of this project is to build a fault-tolerant atomic broadcast service using the Paxos consensus algorithm. The implementation is done in stages, starting from the basic Synod algorithm for single-value consensus, extending it to Multi-Paxos for a sequence of values, and finally incorporating performance optimizations.
+The bash scripts can be runned from a clean Ubuntu 24.04 image. You may need `sudo` access to run the scripts.
 
-The system is designed to tolerate crash failures and message loss while always guaranteeing safety (total order, agreement, and integrity).
+Some of the scripts use `iptables` to simulate message loss through firewall rules. Adding these rules on your local machine is risky, as they greatly impact the performance of the network communication. The suggestion is to run everything inside a virtual machine (e.g., with `multipass`).
 
-### Key Concepts
-*   **Paxos Protocol:** A family of protocols for solving consensus in a network of unreliable processors.
-*   **Atomic Broadcast:** A reliable multicast primitive that ensures all correct processes deliver the same set of messages in the same order.
-*   **System Roles:** The implementation is structured around four distinct roles: Clients, Proposers, Acceptors, and Learners, communicating via IP multicast.
+Depending on the network interface used, ip multicast might not be enabled. You can check using `ifconfig` and checking that the "MULTICAST" flag is set. You *might* have to enable it using:
 
-### Milestones
-1.  **Synod Algorithm:** Implementation of the basic Paxos protocol to agree on a single value.
-2.  **Multi-Paxos:** Extension of the Synod algorithm to decide on a sequence of values in total order.
-3.  **Optimizations:** Implementation of techniques such as message batching and reduced communication steps to improve performance.
+```
+ifconfig IFACE multicast
+```
 
-## Implementation Details
+where `IFACE` is the name of the interface. Using a connected cable/wifi interface probably will not have this problem (e.g. "eth0", "wlan0").
 
-This section outlines the design and implementation choices made for each milestone of the project.
+## How to run the tests
 
-### Milestone 1: Synod Algorithm
+1. `cd` to this directory. All the scripts should be run from here. Make sure the scripts in the `scripts` folder have executable permissions.
 
-*   **Design Choices:**
-    *   *(Describe the main architectural decisions. How are roles implemented? How is state managed?)*
-*   **Data Structures:**
-    *   `ProposalID`: *(Explain the structure of proposal numbers, e.g., a tuple of (sequence_number, proposer_id)).*
-    *   `Proposer State`: *(List the key variables managed by a proposer, such as `proposal_id`, `proposed_value`, `promises_received`).*
-    *   `Acceptor State`: *(List the key variables, like `promised_id`, `accepted_id`, `accepted_value`).*
-*   **Message Flow:**
-    *   **Phase 1a (Prepare):** Proposer sends a `Prepare(proposal_id)` message to all acceptors.
-    *   **Phase 1b (Promise):** Acceptors respond with `Promise(promised_id, accepted_id, accepted_value)` if `proposal_id` is the highest seen.
-    *   **Phase 2a (Accept):** After receiving a majority of promises, the proposer sends an `Accept(proposal_id, value)` message.
-    *   **Phase 2b (Accepted):** Acceptors accept the proposal and notify learners by sending an `Accepted(proposal_id, accepted_value)` message.
-    *   **Decision:** Learners learn a value upon receiving `Accepted` messages from a majority of acceptors.
+2. Permorm a run and check the results as follows:
+```
+scripts/run.sh -n 1000
+scripts/check.sh
+```
 
-### Milestone 2: Multi-Paxos
+3. Once `gnuplot` is installed with `sudo apt install gnuplot`, you can collect latency data and plot it with the following commands:
+```
+scripts/run.sh -n 1000 -l 0
+gnuplot scripts/plotting/cdf.gp
+gnuplot scripts/plotting/cartesian.gp
+```
+These will generate the two plots in the logs folder. Not that clients need to learn the values to compute the latencies. Reset the corresponding flag in the client to disable this feature: then, only the learners will learn.
 
-*   **Design Choices:**
-    *   *(Explain how you extended the Synod algorithm. How are multiple instances managed? How is the leader elected or handled?)*
-    *   *(Describe the mechanism for handling gaps in the learned sequence).*
-*   **Data Structures:**
-    *   `Learner State`: *(Detail the data structures used to store decided values in order, e.g., a dictionary or a list mapping instance numbers to values).*
-    *   `Proposer/Acceptor State`: *(Describe any modifications to support multiple instances, e.g., storing states per instance number).*
-*   **Message Flow:**
-    *   *(Explain how messages are modified to include an instance number, e.g., `Prepare(instance, proposal_id)`).*
-    *   *(Describe the process for a new learner to "catch up" on previously decided values).*
+## Caveats/Tips
 
-### Milestone 3: Optimizations
+1. The scripts will try to `pkill` your processes (SIGTERM). You might need to "flush" the output of your learners to make sure values are printed when learned.
 
-*   **Optimization 1: Acceptors Send to Learners Directly**
-    *   **Implementation:** *(Explain how you modified the Phase 2b message flow. Acceptors now send `Accepted` messages directly to the Learner multicast group instead of back to the Proposer).*
-*   **Optimization 2: Phase 1 Before Value is Known**
-    *   **Implementation:** *(Describe how the leader performs Phase 1 for a future instance as soon as the current one is decided, without waiting for a new value from a client).*
-*   **Optimization 3: Batching**
-    *   **Implementation:** *(Detail how multiple client values are batched into a single Paxos instance. Explain the data structure used for the batch and how learners process it).*
+2. The output of your "learners" should be **ONLY** the values learned, one per line. Anything else will fail the checks.
 
-## Running the Implementation
+3. The scripts have many parameters to test for different cases:
+    - `-n X` allows each client to generate `X` values
+    - `-d` enables debug
+    - `--loss X` drops `X`% (e.g., `0.1`) of sent messages
+    - `--catchup` starts a late learner to test catchup
+    - `-s` sets the sleep time used in the scripts: it may be increased if a lot of values are sent
+    - `--ip` changes the default multicast ip address (`239.1.2.3`)
+    - `-c` sets the number of clients
+    - `-p` sets the number of proposers
+    - `-a` sets the number of acceptors
+    - `-l` sets the number of learners
 
-For detailed information on dependencies, environment setup, and how to run the tests and generate plots, please refer to the detailed instructions document.
+4. In case you specify a loss probability and kill the script, you may need to manually remove the firewall rule. Run `scripts/cleanup.sh` to cleanup. You can check the active rules with `sudo iptables -L INPUT -v --line-numbers`.
 
-**➡️ [View Detailed Setup and Running Instructions](instructions.md)**
+5. If you started a run, but then you stopped it with `Ctrl+C`, it is a good idea to close the current terminal and reopen another one, since some processes may still be running and they may still send/receive messages for a new run.

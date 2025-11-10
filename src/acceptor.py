@@ -28,7 +28,7 @@ class Acceptor:
                         self.rnd = c_rnd
                         msg_1B = pickle.dumps(["1B", self.rnd, self.v_rnd, self.v_val])
                         self.s.sendto(msg_1B, self.config["proposers"])
-                        logging.debug(f"Sending {msg_1B} to proposers")
+                        logging.debug(f"Sending {pickle.loads(msg_1B)} to proposers")
                 case "2A":
                     c_rnd, c_val = msg[1:]
                     if c_rnd >= self.rnd:
@@ -36,7 +36,7 @@ class Acceptor:
                         self.v_val = c_val
                         msg_2B = pickle.dumps(["2B", self.v_rnd, self.v_val])
                         self.s.sendto(msg_2B, self.config["proposers"])
-                        logging.debug(f"Sending {msg_2B} to proposers")
+                        logging.debug(f"Sending {pickle.loads(msg_2B)} to proposers")
                 case _:
                     logging.error(f"Unknown message: {msg}")
                     break
