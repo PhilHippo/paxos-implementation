@@ -1,6 +1,7 @@
 import sys
 import logging
 from utils import mcast_receiver, mcast_sender
+import pickle
 
 
 class Learner:
@@ -13,6 +14,8 @@ class Learner:
         logging.debug(f"-> learner {self.id}")
         while True:
             msg, addr = self.r.recvfrom(2**16)
-            logging.debug(f"Received {msg.decode()} from {addr}")
-            print(msg.decode())
+            msg = pickle.loads(msg)
+            v_val = msg[1]
+            logging.debug(f"Decided on {v_val}")
+            print(v_val)
             sys.stdout.flush()

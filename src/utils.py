@@ -11,8 +11,11 @@ def load_config(path=""):
 
     with open(path, "r") as f:
         config = {}
-        for role, value in dict(json.load(f)).items():
-            config[role] = (value["ip"], int(value["port"]))
+        for id, value in dict(json.load(f)).items():
+            if id == "n":
+                config[id] = int(value)
+            else:
+                config[id] = (value["ip"], int(value["port"]))
         return config
 
 

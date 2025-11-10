@@ -2,6 +2,7 @@ import sys
 import logging
 import time
 from utils import mcast_sender, mcast_receiver
+import pickle #used to encode and decode lists
 
 
 class Client:
@@ -17,13 +18,13 @@ class Client:
     def run(self):
         logging.debug(f"-> client {self.id}")
         for value in sys.stdin:
-            value = value.strip()
-            
+            value = pickle.dumps(["client", value.strip()])
+
             if self.measuring:
                 start_time = time.perf_counter()
 
             logging.debug(f"client: sending {value} to proposers")
-            self.s.sendto(value.encode(), self.config["proposers"])
+            self.s.sendto(value, self.config["proposers"])
             
             if self.measuring:
                 msg, addr = self.r.recvfrom(2**16)
@@ -33,7 +34,7 @@ class Client:
                 with open(self.output_file, "a") as f:
                     f.write(f"{latency:.6f}\n")
                 
-                print(msg.decode())
+                print(pickle.loads(msg))
                 sys.stdout.flush()
                 
         logging.debug("client done.")
