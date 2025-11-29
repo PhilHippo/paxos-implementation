@@ -10,12 +10,12 @@ class Proposer:
         self.c_rnd = 0
         self.quorum_1B = []
         self.quorum_2B = []
-        self.r = mcast_receiver(config["proposers"])
-        self.s = mcast_sender()
+        self.r = mcast_receiver(config["proposers"]) #socket to receive from clients and acceptors
+        self.s = mcast_sender() #socket to send to acceptors and learners
         self.value = None
 
-        # number of acceptors
-        self.majority_acceptors = math.ceil(self.config["n"]/2)
+        # number of acceptors is >= n/2 + 1
+        self.majority_acceptors = int(self.config["n"] / 2 + 1)
 
     def run(self):
         logging.info(f"-> proposer {self.id}")

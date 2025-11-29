@@ -9,8 +9,8 @@ class Client:
     def __init__(self, config, id):
         self.config = config
         self.id = id
-        self.s = mcast_sender()
-        self.r = mcast_receiver(config["learners"])
+        self.s = mcast_sender() #initialize socket to send to proposers
+        self.r = mcast_receiver(config["learners"]) #initialize socket to receive from learners
         
         self.output_file = f"logs/latency_client{self.id}"
         self.measuring = True
@@ -18,18 +18,18 @@ class Client:
     def run(self):
         logging.debug(f"-> client {self.id}")
         for value in sys.stdin:
-            value = pickle.dumps(["client", value.strip()])
+            value = pickle.dumps(["client", value.strip()]) #read input from stdin
 
             if self.measuring:
-                start_time = time.perf_counter()
+                start_time = time.perf_counter() #start time measurement
 
             logging.debug(f"client: sending {value} to proposers")
             self.s.sendto(value, self.config["proposers"])
             
             if self.measuring:
-                msg, addr = self.r.recvfrom(2**16)
+                msg, addr = self.r.recvfrom(2**16) #wait for response from learners
                 
-                end_time = time.perf_counter()
+                end_time = time.perf_counter() #end time measurement
                 latency = (end_time - start_time) * 1_000_000 # us
                 with open(self.output_file, "a") as f:
                     f.write(f"{latency:.6f}\n")
