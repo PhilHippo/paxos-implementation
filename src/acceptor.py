@@ -34,7 +34,7 @@ class Acceptor:
                 case "2A":
                     c_rnd, c_val, id_p, msg_num, client_id = msg[1:]
                     if (c_rnd >= self.rnd) and (c_val not in self.accepted):
-                        self.accepted.add(c_val)
+                        self.accepted.add((msg_num, client_id))
                         msg_2B = pickle.dumps(["2B", c_rnd, c_val, id_p, msg_num, client_id])
                         self.s.sendto(msg_2B, self.config["proposers"])
                         logging.debug(f"Sending {pickle.loads(msg_2B)} to proposers")
