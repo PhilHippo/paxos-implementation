@@ -14,11 +14,14 @@ class Client:
         
         self.output_file = f"logs/latency_client{self.id}"
         self.measuring = True
+        self.msg_num = 0  # sequence number for FIFO ordering
 
     def run(self):
         logging.debug(f"-> client {self.id}")
         for value in sys.stdin:
-            value = pickle.dumps(["client", value.strip()]) #read input from stdin
+            # Include client_id and seq_num for instance identification by proposers
+            value = pickle.dumps(["client", self.id, self.msg_num, value.strip()])
+            self.msg_num += 1
 
             if self.measuring:
                 start_time = time.perf_counter() #start time measurement
