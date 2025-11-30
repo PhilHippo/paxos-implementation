@@ -11,8 +11,11 @@ def load_config(path=""):
 
     with open(path, "r") as f:
         config = {}
-        for role, value in dict(json.load(f)).items():
-            config[role] = (value["ip"], int(value["port"]))
+        for id, value in dict(json.load(f)).items():
+            if id == "n":
+                config[id] = int(value)
+            else:
+                config[id] = (value["ip"], int(value["port"]))
         return config
 
 
@@ -34,25 +37,3 @@ def mcast_sender(ttl=1):
         socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("b", ttl)
     )
     return send_sock
-
-
-def is_greater_than(p1, p2):
-    """
-    Compare two proposal IDs (timestamp, proposer_id) using totally ordered logical clocks.
-    Returns True if p1 > p2, False otherwise.
-    
-    Implements total ordering: (T1, id1) > (T2, id2) iff:
-      (a) T1 > T2, or
-      (b) T1 == T2 and id1 > id2
-    
-    This ensures proposal IDs have a total order based on Lamport logical clocks.
-    """
-    timestamp1, pid1 = p1
-    timestamp2, pid2 = p2
-    
-    if timestamp1 > timestamp2:
-        return True
-    elif timestamp1 == timestamp2:
-        return pid1 > pid2
-    else:
-        return False
