@@ -2,8 +2,7 @@ import sys
 import logging
 import time
 from utils import mcast_sender, mcast_receiver
-import pickle #used to encode and decode lists
-
+import pickle
 
 class Client:
     def __init__(self, config, id):

@@ -16,6 +16,9 @@ class Proposer:
         self.s = mcast_sender()
         self.value = None
         self.queue = deque()
+        
+        # Global Sequence Number for Total Order
+        self.instance_seq = 0
 
         # number of acceptors
         self.majority_acceptors = math.ceil(self.config["n"]/2)
@@ -39,11 +42,9 @@ class Proposer:
             msg = pickle.loads(msg)
             logging.debug(f"Received {msg} from {addr}")
 
-            # switch case for msg
             match msg[0]:
                 case "client":
                     value, msg_num, client_id = msg[1:]
-
                     logging.debug(f"Queue: {self.queue}")
 
                     if not self.queue:
@@ -54,27 +55,32 @@ class Proposer:
                         self.queue.append((msg_num, client_id, value))
                         
                 case "1B":
-                    rnd, v_rnd, v_val, accepted, id, msg_num, client_id = msg[1:]
-                    if rnd == self.c_rnd and self.id == id:
-                        if((msg_num, client_id) not in accepted and not self.skip):
-                            self.quorum_1B.append((v_rnd, v_val))
-                            logging.debug(f"SIZE quorum_1B  {len(self.quorum_1B)}")
-                            if len(self.quorum_1B) == self.majority_acceptors:
-                                k, V = max(self.quorum_1B, key=lambda x: x[0])
-                                if k == 0:
-                                    c_val = self.value
-                                    msg_2A = pickle.dumps(["2A", self.c_rnd, c_val, self.id, msg_num, client_id])
-                                    self.s.sendto(msg_2A, self.config["acceptors"])
-                                    logging.debug(f"Sending {pickle.loads(msg_2A)} to acceptors")
-                                # else:
-                                #     c_val = V
+                    # Now receives the full accepted_history from acceptors
+                    rnd, accepted_history, id_a, msg_num, client_id = msg[1:]
+                    
+                    if rnd == self.c_rnd:
+                        # accepted_history is a dict: {instance_id: (v_rnd, v_val, msg_num, client_id)}
+                        self.quorum_1B.append(accepted_history)
+                        logging.debug(f"SIZE quorum_1B  {len(self.quorum_1B)}")
+                        
+                        if len(self.quorum_1B) == self.majority_acceptors:
+                            # 1. Discovery: Find the highest instance ID used by the cluster
+                            max_inst = -1
+                            for hist in self.quorum_1B:
+                                if hist: # check if dict is not empty
+                                    max_in_hist = max(hist.keys())
+                                    if max_in_hist > max_inst:
+                                        max_inst = max_in_hist
                             
-                                # msg_2A = pickle.dumps(["2A", self.c_rnd, c_val])
-                                # self.s.sendto(msg_2A, self.config["acceptors"])
-                                # logging.debug(f"Sending {pickle.loads(msg_2A)} to acceptors")
-                        elif(not self.skip):
-                            self.skip = True
-                            logging.debug(f"Skipping value {self.value}. Already proposed!")
+                            # 2. Update local sequence to be next available slot
+                            self.instance_seq = max(self.instance_seq, max_inst + 1)
+                            logging.debug(f"Proposing in instance: {self.instance_seq}")
+
+                            # 3. Propose current value
+                            c_val = self.value
+                            msg_2A = pickle.dumps(["2A", self.c_rnd, c_val, self.id, self.instance_seq, msg_num, client_id])
+                            self.s.sendto(msg_2A, self.config["acceptors"])
+                            logging.debug(f"Sending {pickle.loads(msg_2A)} to acceptors")
 
                 case "2B":
                     v_rnd, v_val, id, msg_num, client_id = msg[1:]
@@ -82,10 +88,14 @@ class Proposer:
                         self.quorum_2B.append((v_rnd, v_val))
                         logging.debug(f"SIZE quorum_2B {len(self.quorum_2B)}")
                         if len(self.quorum_2B) == self.majority_acceptors:
-                            msg_3 = pickle.dumps(["Decision", v_val, msg_num, client_id])
+                            # Include instance_seq in decision
+                            msg_3 = pickle.dumps(["Decision", v_val, self.instance_seq, msg_num, client_id])
                             self.s.sendto(msg_3, self.config["learners"])
                             logging.debug(f"Sending {pickle.loads(msg_3)} to learners")
                             
+                            # Increment for next request
+                            self.instance_seq += 1
+
                             logging.debug(f"popping queue: {self.queue[0]}")
                             self.queue.popleft()
                             if self.queue:
@@ -96,4 +106,3 @@ class Proposer:
                 case _:
                     logging.error(f"Unknown message: {msg}")
                     break
-    
