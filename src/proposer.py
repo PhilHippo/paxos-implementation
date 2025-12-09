@@ -72,25 +72,20 @@ class Proposer:
                         self.queue.append((msg_num, client_id, value))
                         
                 case "1B":
-                    # Now receives the full accepted_history from acceptors
-                    rnd, accepted_history, id_a, msg_num, client_id = msg[1:]
+                    # Now receives only max_inst instead of full accepted_history
+                    rnd, max_inst, id_a, msg_num, client_id = msg[1:]
                     
                     if rnd == self.c_rnd:
-                        # accepted_history is a dict: {instance_id: (v_rnd, v_val, msg_num, client_id)}
-                        self.quorum_1B.append(accepted_history)
+                        # Collect max_inst from each acceptor
+                        self.quorum_1B.append(max_inst)
                         logging.debug(f"SIZE quorum_1B  {len(self.quorum_1B)}")
                         
                         if len(self.quorum_1B) == self.majority_acceptors:
                             # 1. Discovery: Find the highest instance ID used by the cluster
-                            max_inst = -1
-                            for hist in self.quorum_1B:
-                                if hist: # check if dict is not empty
-                                    max_in_hist = max(hist.keys())
-                                    if max_in_hist > max_inst:
-                                        max_inst = max_in_hist
+                            max_inst_global = max(self.quorum_1B)
                             
                             # 2. Update local sequence to be next available slot
-                            next_instance = max(self.instance_seq, max_inst + 1)
+                            next_instance = max(self.instance_seq, max_inst_global + 1)
                             
                             # 3. Check if we have a value to propose
                             if self.value is not None:

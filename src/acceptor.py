@@ -25,7 +25,10 @@ class Acceptor:
                     c_rnd, id_p, msg_num, client_id = msg[1:]
                     if self.rnd < c_rnd:
                         self.rnd = c_rnd
-                        msg_1B = pickle.dumps(["1B", self.rnd, self.accepted_history, id_p, msg_num, client_id])
+                        # Optimization: Only send max_inst instead of full history
+                        # Proposer only needs this to know next available slot
+                        max_inst = max(self.accepted_history.keys()) if self.accepted_history else -1
+                        msg_1B = pickle.dumps(["1B", self.rnd, max_inst, id_p, msg_num, client_id])
                         self.s.sendto(msg_1B, self.config["proposers"])
                         logging.debug(f"Sending {pickle.loads(msg_1B)} to proposers")
 
@@ -49,7 +52,6 @@ class Acceptor:
                     if req_instance_id in self.accepted_history:
                         v_rnd, val, m_num, c_id = self.accepted_history[req_instance_id]
                         resp = pickle.dumps(["CatchupResponse", req_instance_id, val, m_num, c_id])
-                       
                         self.s.sendto(resp, self.config["learners"])
                         logging.debug(f"Sent CatchupResponse for inst {req_instance_id} to learners")
 
