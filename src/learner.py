@@ -2,6 +2,8 @@ import sys
 import logging
 from utils import mcast_receiver, mcast_sender
 import pickle
+import select
+import time
 
 class Learner:
     def __init__(self, config, id):
@@ -21,19 +23,32 @@ class Learner:
         # Track 2B messages to detect quorum (optimization)
         # {instance_id: {(v_rnd, v_val): count}}
         self.quorum_2B = {}
-        self.majority_acceptors = (config["n"] // 2) + 1 
+        self.majority_acceptors = (config["n"] // 2) + 1
+        
+        # Catchup tracking
+        self.catchup_pending = set()  # instances we're waiting for
+        self.catchup_max_instance = -1  # highest instance we know about
+        self.last_catchup_request = 0  # timestamp of last catchup request 
 
     def deliver(self, v_val):
         """
         Deliver a batch of values.
         v_val is a list of tuples: [(msg_num, client_id, value), ...]
         """
+        # Track which clients are affected by this batch
+        affected_clients = set()
+        
+        # First, add all values from the batch to the buffer
         for msg_num, client_id, value in v_val:
             if client_id not in self.client_next_seq:
                 self.client_next_seq[client_id] = 0
-                
             self.client_buffer[(client_id, msg_num)] = value
-
+            affected_clients.add(client_id)
+        
+        # Then, try to deliver consecutive values for all clients
+        # Check all clients (not just affected ones) because this batch might
+        # complete a sequence that was waiting for values from a previous batch
+        for client_id in self.client_next_seq:
             while (client_id, self.client_next_seq[client_id]) in self.client_buffer:
                 val = self.client_buffer[(client_id, self.client_next_seq[client_id])]
                 print(val)
@@ -42,12 +57,59 @@ class Learner:
                 sys.stdout.flush()
 
     def request_catchup(self, start, end):
-        """Helper to batch request missing instances"""
+        """Helper to batch request missing instances with rate limiting"""
         logging.debug(f"Bootstrapping/Catching up from {start} to {end}")
+        
+        # Add to pending set
+        for missing_id in range(start, end + 1):
+            if missing_id not in self.instance_buffer:
+                self.catchup_pending.add(missing_id)
+        
+        # Update max instance
+        self.catchup_max_instance = max(self.catchup_max_instance, end)
+        
+        # Send requests in batches with minimal delays
+        batch_size = 200
+        requests_sent = 0
         for missing_id in range(start, end + 1):
             if missing_id not in self.instance_buffer:
                 catchup_msg = pickle.dumps(["Catchup", missing_id])
                 self.s.sendto(catchup_msg, self.config["acceptors"])
+                requests_sent += 1
+                
+                # Add tiny delay every batch_size requests
+                if requests_sent % batch_size == 0:
+                    time.sleep(0.005)
+        
+        self.last_catchup_request = time.time()
+    
+    def retry_missing_catchup(self):
+        """Retry catchup for instances still missing"""
+        if not self.catchup_pending:
+            return
+        
+        now = time.time()
+        # Retry more frequently for large catchups
+        if now - self.last_catchup_request < 0.1:
+            return
+        
+        missing = []
+        for inst_id in sorted(self.catchup_pending):
+            if inst_id not in self.instance_buffer:
+                missing.append(inst_id)
+        
+        if missing:
+            logging.debug(f"Retrying catchup for {len(missing)} missing instances")
+            # Send retry requests in larger batches
+            batch_size = 200
+            for i, inst_id in enumerate(missing):
+                catchup_msg = pickle.dumps(["Catchup", inst_id])
+                self.s.sendto(catchup_msg, self.config["acceptors"])
+                
+                if (i + 1) % batch_size == 0:
+                    time.sleep(0.003)
+            
+            self.last_catchup_request = now
 
     def run(self):
         logging.debug(f"-> learner {self.id}")
@@ -58,6 +120,14 @@ class Learner:
         self.s.sendto(query_msg, self.config["acceptors"])
 
         while True:
+            # Use select with shorter timeout for more aggressive retry
+            ready = select.select([self.r], [], [], 0.1)
+            
+            if not ready[0]:
+                # Timeout - retry missing catchup
+                self.retry_missing_catchup()
+                continue
+            
             msg, addr = self.r.recvfrom(2**16)
             msg = pickle.loads(msg)
 
@@ -125,6 +195,9 @@ class Learner:
 
                 case "CatchupResponse":
                     instance_id, v_val = msg[1:]
+                    
+                    # Remove from pending
+                    self.catchup_pending.discard(instance_id)
                     
                     if instance_id >= self.global_next_seq and instance_id not in self.instance_buffer:
                         self.instance_buffer[instance_id] = v_val
