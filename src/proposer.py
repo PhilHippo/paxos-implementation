@@ -108,15 +108,14 @@ class Proposer:
                                 logging.debug(f"Proactive quorum ready for instance {next_instance}, waiting for value")
 
                 case "2B":
+                    # Optimization: 2B messages go to both learners (for learning) and proposers (for flow control)
                     v_rnd, v_val, id, msg_num, client_id = msg[1:]
                     if v_rnd == self.c_rnd and self.id == id:
                         self.quorum_2B.append((v_rnd, v_val))
                         logging.debug(f"SIZE quorum_2B {len(self.quorum_2B)}")
                         if len(self.quorum_2B) == self.majority_acceptors:
-                            # Include instance_seq in decision
-                            msg_3 = pickle.dumps(["Decision", v_val, self.instance_seq, msg_num, client_id])
-                            self.s.sendto(msg_3, self.config["learners"])
-                            logging.debug(f"Sending {pickle.loads(msg_3)} to learners")
+                            # Consensus reached - proposer can proceed to next value
+                            logging.debug(f"Consensus reached for instance {self.instance_seq}")
                             
                             # Increment for next request
                             self.instance_seq += 1

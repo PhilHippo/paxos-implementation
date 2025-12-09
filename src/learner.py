@@ -16,7 +16,12 @@ class Learner:
 
         # Buffer for Consensus level ordering
         self.global_next_seq = 0
-        self.instance_buffer = {} 
+        self.instance_buffer = {}
+        
+        # Track 2B messages to detect quorum (optimization)
+        # {instance_id: {(v_rnd, v_val): count}}
+        self.quorum_2B = {}
+        self.majority_acceptors = (config["n"] // 2) + 1 
 
     def deliver(self, v_val, msg_num, client_id):
         if client_id not in self.client_next_seq:
@@ -52,6 +57,40 @@ class Learner:
             msg = pickle.loads(msg)
 
             match msg[0]:
+                case "2B":
+                    # Optimization: Receive 2B directly from acceptors
+                    v_rnd, v_val, instance_id, msg_num, client_id = msg[1:]
+                    
+                    if instance_id < self.global_next_seq:
+                        continue
+                    
+                    # Track votes for this instance
+                    if instance_id not in self.quorum_2B:
+                        self.quorum_2B[instance_id] = {}
+                    
+                    key = (v_rnd, v_val)
+                    if key not in self.quorum_2B[instance_id]:
+                        self.quorum_2B[instance_id][key] = 0
+                    self.quorum_2B[instance_id][key] += 1
+                    
+                    # Check if we have a quorum (majority) for this value
+                    if self.quorum_2B[instance_id][key] >= self.majority_acceptors:
+                        if instance_id not in self.instance_buffer:
+                            self.instance_buffer[instance_id] = (v_val, msg_num, client_id)
+                            
+                            if instance_id == self.global_next_seq:
+                                while self.global_next_seq in self.instance_buffer:
+                                    val, mn, cid = self.instance_buffer[self.global_next_seq]
+                                    self.deliver(val, mn, cid)
+                                    del self.instance_buffer[self.global_next_seq]
+                                    self.global_next_seq += 1
+                            else:
+                                # Gap detection
+                                self.request_catchup(self.global_next_seq, instance_id - 1)
+                        
+                        # Clean up quorum tracking for this instance
+                        del self.quorum_2B[instance_id]
+                
                 case "Decision":
                     v_val, instance_id, msg_num, client_id = msg[1:]
 

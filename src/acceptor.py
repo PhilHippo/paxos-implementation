@@ -33,9 +33,16 @@ class Acceptor:
                     c_rnd, c_val, id_p, instance_id, msg_num, client_id = msg[1:]
                     if c_rnd >= self.rnd:
                         self.accepted_history[instance_id] = (c_rnd, c_val, msg_num, client_id)
-                        msg_2B = pickle.dumps(["2B", c_rnd, c_val, id_p, msg_num, client_id])
-                        self.s.sendto(msg_2B, self.config["proposers"])
-                        logging.debug(f"Sending {pickle.loads(msg_2B)} to proposers")
+                        # Optimization: Send 2B to BOTH learners AND proposers
+                        # Learners: to learn value directly (saves 1 hop)
+                        # Proposers: to know when to proceed with next request
+                        msg_2B_learner = pickle.dumps(["2B", c_rnd, c_val, instance_id, msg_num, client_id])
+                        self.s.sendto(msg_2B_learner, self.config["learners"])
+                        logging.debug(f"Sending {pickle.loads(msg_2B_learner)} to learners")
+                        
+                        msg_2B_proposer = pickle.dumps(["2B", c_rnd, c_val, id_p, msg_num, client_id])
+                        self.s.sendto(msg_2B_proposer, self.config["proposers"])
+                        logging.debug(f"Sending {pickle.loads(msg_2B_proposer)} to proposers")
 
                 case "Catchup":
                     req_instance_id = msg[1]
