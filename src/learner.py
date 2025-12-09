@@ -23,18 +23,23 @@ class Learner:
         self.quorum_2B = {}
         self.majority_acceptors = (config["n"] // 2) + 1 
 
-    def deliver(self, v_val, msg_num, client_id):
-        if client_id not in self.client_next_seq:
-            self.client_next_seq[client_id] = 0
-            
-        self.client_buffer[(client_id, msg_num)] = v_val
+    def deliver(self, v_val):
+        """
+        Deliver a batch of values.
+        v_val is a list of tuples: [(msg_num, client_id, value), ...]
+        """
+        for msg_num, client_id, value in v_val:
+            if client_id not in self.client_next_seq:
+                self.client_next_seq[client_id] = 0
+                
+            self.client_buffer[(client_id, msg_num)] = value
 
-        while (client_id, self.client_next_seq[client_id]) in self.client_buffer:
-            val = self.client_buffer[(client_id, self.client_next_seq[client_id])]
-            print(val)
-            del self.client_buffer[(client_id, self.client_next_seq[client_id])]
-            self.client_next_seq[client_id] += 1
-            sys.stdout.flush()
+            while (client_id, self.client_next_seq[client_id]) in self.client_buffer:
+                val = self.client_buffer[(client_id, self.client_next_seq[client_id])]
+                print(val)
+                del self.client_buffer[(client_id, self.client_next_seq[client_id])]
+                self.client_next_seq[client_id] += 1
+                sys.stdout.flush()
 
     def request_catchup(self, start, end):
         """Helper to batch request missing instances"""
@@ -59,7 +64,7 @@ class Learner:
             match msg[0]:
                 case "2B":
                     # Optimization: Receive 2B directly from acceptors
-                    v_rnd, v_val, instance_id, msg_num, client_id = msg[1:]
+                    v_rnd, v_val, instance_id = msg[1:]
                     
                     if instance_id < self.global_next_seq:
                         continue
@@ -68,7 +73,8 @@ class Learner:
                     if instance_id not in self.quorum_2B:
                         self.quorum_2B[instance_id] = {}
                     
-                    key = (v_rnd, v_val)
+                    # Convert v_val (list) to tuple to make it hashable
+                    key = (v_rnd, tuple(v_val))
                     if key not in self.quorum_2B[instance_id]:
                         self.quorum_2B[instance_id][key] = 0
                     self.quorum_2B[instance_id][key] += 1
@@ -76,12 +82,12 @@ class Learner:
                     # Check if we have a quorum (majority) for this value
                     if self.quorum_2B[instance_id][key] >= self.majority_acceptors:
                         if instance_id not in self.instance_buffer:
-                            self.instance_buffer[instance_id] = (v_val, msg_num, client_id)
+                            self.instance_buffer[instance_id] = v_val
                             
                             if instance_id == self.global_next_seq:
                                 while self.global_next_seq in self.instance_buffer:
-                                    val, mn, cid = self.instance_buffer[self.global_next_seq]
-                                    self.deliver(val, mn, cid)
+                                    val = self.instance_buffer[self.global_next_seq]
+                                    self.deliver(val)
                                     del self.instance_buffer[self.global_next_seq]
                                     self.global_next_seq += 1
                             else:
@@ -92,17 +98,17 @@ class Learner:
                         del self.quorum_2B[instance_id]
                 
                 case "Decision":
-                    v_val, instance_id, msg_num, client_id = msg[1:]
+                    v_val, instance_id = msg[1:]
 
                     if instance_id < self.global_next_seq:
                         continue
 
-                    self.instance_buffer[instance_id] = (v_val, msg_num, client_id)
+                    self.instance_buffer[instance_id] = v_val
 
                     if instance_id == self.global_next_seq:
                         while self.global_next_seq in self.instance_buffer:
-                            val, mn, cid = self.instance_buffer[self.global_next_seq]
-                            self.deliver(val, mn, cid)
+                            val = self.instance_buffer[self.global_next_seq]
+                            self.deliver(val)
                             del self.instance_buffer[self.global_next_seq]
                             self.global_next_seq += 1
                     else:
@@ -118,13 +124,13 @@ class Learner:
                         self.request_catchup(self.global_next_seq, highest_instance_id)
 
                 case "CatchupResponse":
-                    instance_id, v_val, msg_num, client_id = msg[1:]
+                    instance_id, v_val = msg[1:]
                     
                     if instance_id >= self.global_next_seq and instance_id not in self.instance_buffer:
-                        self.instance_buffer[instance_id] = (v_val, msg_num, client_id)
+                        self.instance_buffer[instance_id] = v_val
                         
                         while self.global_next_seq in self.instance_buffer:
-                            val, mn, cid = self.instance_buffer[self.global_next_seq]
-                            self.deliver(val, mn, cid)
+                            val = self.instance_buffer[self.global_next_seq]
+                            self.deliver(val)
                             del self.instance_buffer[self.global_next_seq]
                             self.global_next_seq += 1

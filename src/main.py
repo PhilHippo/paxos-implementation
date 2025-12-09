@@ -15,10 +15,12 @@ def main():
     parser.add_argument(
         "-d", "--debug", action="store_true", help="Enable debug output", default=False
     )
+    parser.add_argument("-b", "--batch-size", type=int, default=1, help="Batch size for proposers")
     args = parser.parse_args()
 
     role = args.role
     node_id = int(args.pid)
+    batch_size = args.batch_size
 
     config = load_config()
 
@@ -31,7 +33,7 @@ def main():
         node = Client(config, node_id)
         node.run()
     elif role == "proposer":
-        node = Proposer(config, node_id)
+        node = Proposer(config, node_id, batch_size)
         node.run()
     elif role == "acceptor":
         node = Acceptor(config, node_id)

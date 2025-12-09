@@ -8,7 +8,7 @@ class Acceptor:
         self.config = config
         self.id = id
         self.rnd = 0
-        # History: {instance_id: (v_rnd, v_val, msg_num, client_id)}
+        # History: {instance_id: (v_rnd, v_val)}  - v_val is now a batch (list of tuples)
         self.accepted_history = {} 
         self.r = mcast_receiver(config["acceptors"])
         self.s = mcast_sender()
@@ -22,36 +22,36 @@ class Acceptor:
 
             match msg[0]:
                 case "1A":
-                    c_rnd, id_p, msg_num, client_id = msg[1:]
+                    c_rnd, id_p = msg[1:]
                     if self.rnd < c_rnd:
                         self.rnd = c_rnd
                         # Optimization: Only send max_inst instead of full history
                         # Proposer only needs this to know next available slot
                         max_inst = max(self.accepted_history.keys()) if self.accepted_history else -1
-                        msg_1B = pickle.dumps(["1B", self.rnd, max_inst, id_p, msg_num, client_id])
+                        msg_1B = pickle.dumps(["1B", self.rnd, max_inst, id_p])
                         self.s.sendto(msg_1B, self.config["proposers"])
                         logging.debug(f"Sending {pickle.loads(msg_1B)} to proposers")
 
                 case "2A":
-                    c_rnd, c_val, id_p, instance_id, msg_num, client_id = msg[1:]
+                    c_rnd, c_val, id_p, instance_id = msg[1:]
                     if c_rnd >= self.rnd:
-                        self.accepted_history[instance_id] = (c_rnd, c_val, msg_num, client_id)
+                        self.accepted_history[instance_id] = (c_rnd, c_val)
                         # Optimization: Send 2B to BOTH learners AND proposers
                         # Learners: to learn value directly (saves 1 hop)
                         # Proposers: to know when to proceed with next request
-                        msg_2B_learner = pickle.dumps(["2B", c_rnd, c_val, instance_id, msg_num, client_id])
+                        msg_2B_learner = pickle.dumps(["2B", c_rnd, c_val, instance_id])
                         self.s.sendto(msg_2B_learner, self.config["learners"])
                         logging.debug(f"Sending {pickle.loads(msg_2B_learner)} to learners")
                         
-                        msg_2B_proposer = pickle.dumps(["2B", c_rnd, c_val, id_p, msg_num, client_id])
+                        msg_2B_proposer = pickle.dumps(["2B", c_rnd, c_val, id_p])
                         self.s.sendto(msg_2B_proposer, self.config["proposers"])
                         logging.debug(f"Sending {pickle.loads(msg_2B_proposer)} to proposers")
 
                 case "Catchup":
                     req_instance_id = msg[1]
                     if req_instance_id in self.accepted_history:
-                        v_rnd, val, m_num, c_id = self.accepted_history[req_instance_id]
-                        resp = pickle.dumps(["CatchupResponse", req_instance_id, val, m_num, c_id])
+                        v_rnd, val = self.accepted_history[req_instance_id]
+                        resp = pickle.dumps(["CatchupResponse", req_instance_id, val])
                         self.s.sendto(resp, self.config["learners"])
                         logging.debug(f"Sent CatchupResponse for inst {req_instance_id} to learners")
 
