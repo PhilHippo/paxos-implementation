@@ -1,209 +1,142 @@
-import sys
 import logging
 from utils import mcast_receiver, mcast_sender
+import math
 import pickle
-import select
-import time
+from collections import deque
 
-class Learner:
-    def __init__(self, config, id):
+class Proposer:
+    def __init__(self, config, id, batch_size=1):
         self.config = config
         self.id = id
-        self.r = mcast_receiver(config["learners"])
+        self.batch_size = batch_size
+        self.c_rnd = 0
+        self.quorum_1B = []
+        self.quorum_2B = []
+        self.r = mcast_receiver(config["proposers"])
         self.s = mcast_sender()
+        self.value = None
+        self.queue = deque()
         
-        # Buffer for Application level deduplication
-        self.client_buffer = {} 
-        self.client_next_seq = {} 
+        # Global Sequence Number, needed for batching total order
+        self.consensus_instance = 0
 
-        # Buffer for Consensus level ordering
-        self.global_next_seq = 0
-        self.instance_buffer = {}
+        self.majority_acceptors = math.floor(self.config["n"]/2) + 1
         
-        # Track 2B messages to detect quorum (optimization)
-        # {instance_id: {(v_rnd, v_val): count}}
-        self.quorum_2B = {}
-        self.majority_acceptors = (config["n"] // 2) + 1
-        
-        # Catchup tracking
-        self.catchup_pending = set()  # instances we're waiting for
-        self.catchup_max_instance = -1  # highest instance we know about
-        self.last_catchup_request = 0  # timestamp of last catchup request 
+        # Optimization to anticipate phase 1A quorum
+        self.has_proactive_quorum = False
+        self.proactive_consensus_instance_ = None
 
-    def deliver(self, v_val):
-        """
-        Deliver a batch of values.
-        v_val is a list of tuples: [(msg_num, client_id, value), ...]
-        """
-        # Track which clients are affected by this batch
-        affected_clients = set()
-        
-        # First, add all values from the batch to the buffer
-        for msg_num, client_id, value in v_val:
-            if client_id not in self.client_next_seq:
-                self.client_next_seq[client_id] = 0
-            self.client_buffer[(client_id, msg_num)] = value
-            affected_clients.add(client_id)
-        
-        # Then, try to deliver consecutive values for all clients
-        # Check all clients (not just affected ones) because this batch might
-        # complete a sequence that was waiting for values from a previous batch
-        for client_id in self.client_next_seq:
-            while (client_id, self.client_next_seq[client_id]) in self.client_buffer:
-                val = self.client_buffer[(client_id, self.client_next_seq[client_id])]
-                print(val)
-                del self.client_buffer[(client_id, self.client_next_seq[client_id])]
-                self.client_next_seq[client_id] += 1
-                sys.stdout.flush()
+    def send_1A(self, msg_num=None, client_id=None):
+        self.c_rnd += 1
+        self.quorum_1B = []
+        self.quorum_2B = []
+        self.has_proactive_quorum = False
+        self.proactive_consensus_instance_ = None
 
-    def request_catchup(self, start, end):
-        """Helper to batch request missing instances with rate limiting"""
-        logging.debug(f"Bootstrapping/Catching up from {start} to {end}")
-        
-        # Add to pending set
-        for missing_id in range(start, end + 1):
-            if missing_id not in self.instance_buffer:
-                self.catchup_pending.add(missing_id)
-        
-        # Update max instance
-        self.catchup_max_instance = max(self.catchup_max_instance, end)
-        
-        # Send requests in batches with minimal delays
-        batch_size = 200
-        requests_sent = 0
-        for missing_id in range(start, end + 1):
-            if missing_id not in self.instance_buffer:
-                catchup_msg = pickle.dumps(["Catchup", missing_id])
-                self.s.sendto(catchup_msg, self.config["acceptors"])
-                requests_sent += 1
-                
-                # Add tiny delay every batch_size requests
-                if requests_sent % batch_size == 0:
-                    time.sleep(0.005)
-        
-        self.last_catchup_request = time.time()
-    
-    def retry_missing_catchup(self):
-        """Retry catchup for instances still missing"""
-        if not self.catchup_pending:
-            return
-        
-        now = time.time()
-        # Retry more frequently for large catchups
-        if now - self.last_catchup_request < 0.1:
-            return
-        
-        missing = []
-        for inst_id in sorted(self.catchup_pending):
-            if inst_id not in self.instance_buffer:
-                missing.append(inst_id)
-        
-        if missing:
-            logging.debug(f"Retrying catchup for {len(missing)} missing instances")
-            # Send retry requests in larger batches
-            batch_size = 200
-            for i, inst_id in enumerate(missing):
-                catchup_msg = pickle.dumps(["Catchup", inst_id])
-                self.s.sendto(catchup_msg, self.config["acceptors"])
-                
-                if (i + 1) % batch_size == 0:
-                    time.sleep(0.003)
-            
-            self.last_catchup_request = now
+        # For batching, we don't send msg_num/client_id in 1A (they're in the batch value)
+        msg_1A = pickle.dumps(["1A", self.c_rnd, self.id])
+        self.s.sendto(msg_1A, self.config["acceptors"])
+        logging.debug(f"Sending {pickle.loads(msg_1A)} to acceptors")
+
+    def _create_batch(self):
+        """Create a batch of up to batch_size values from the queue"""
+        batch = []
+        for _ in range(min(self.batch_size, len(self.queue))):
+            batch.append(self.queue.popleft())
+        return batch
 
     def run(self):
-        logging.debug(f"-> learner {self.id}")
-        
-        # 1. On startup: Ask acceptors what the latest instance is
-        logging.debug("Querying acceptors for latest instance ID...")
-        query_msg = pickle.dumps(["QueryLastInstance"])
-        self.s.sendto(query_msg, self.config["acceptors"])
-
+        logging.info(f"-> proposer {self.id}")
+        logging.info(f"{self.config['n']}")
         while True:
-            # Use select with shorter timeout for more aggressive retry
-            ready = select.select([self.r], [], [], 0.1)
-            
-            if not ready[0]:
-                # Timeout - retry missing catchup
-                self.retry_missing_catchup()
-                continue
-            
             msg, addr = self.r.recvfrom(2**16)
             msg = pickle.loads(msg)
+            logging.debug(f"Received {msg} from {addr}")
 
             match msg[0]:
-                case "2B":
-                    # Optimization: Receive 2B directly from acceptors
-                    v_rnd, v_val, instance_id = msg[1:]
+                case "client":
+                    value, msg_num, client_id = msg[1:]
+                    logging.debug(f"Queue: {self.queue}")
+
+                    # Always add to queue
+                    self.queue.append((msg_num, client_id, value))
+
+                    # If no value is being proposed, start a new proposal with a batch
+                    if self.value is None:
+                        # Create a batch from the queue
+                        batch = self._create_batch()
+                        self.value = batch
+                        
+                        # Optimization: if we already have a proactive quorum, skip 1A and go directly to 2A
+                        if self.has_proactive_quorum and self.proactive_consensus_instance_ is not None:
+                            # Use the instance_seq from the proactive prepare
+                            self.consensus_instance = self.proactive_consensus_instance_ 
+                            c_val = self.value
+                            msg_2A = pickle.dumps(["2A", self.c_rnd, c_val, self.id, self.consensus_instance])
+                            self.s.sendto(msg_2A, self.config["acceptors"])
+                            logging.debug(f"Sending {pickle.loads(msg_2A)} to acceptors (proactive optimization)")
+                            # Reset proactive state
+                            self.has_proactive_quorum = False
+                            self.proactive_consensus_instance_ = None
+                        else:
+                            self.send_1A()
+                        
+                case "1B":
+                    rnd, max_inst, id_a = msg[1:]
                     
-                    if instance_id < self.global_next_seq:
-                        continue
-                    
-                    # Track votes for this instance
-                    if instance_id not in self.quorum_2B:
-                        self.quorum_2B[instance_id] = {}
-                    
-                    # Convert v_val (list) to tuple to make it hashable
-                    key = (v_rnd, tuple(v_val))
-                    if key not in self.quorum_2B[instance_id]:
-                        self.quorum_2B[instance_id][key] = 0
-                    self.quorum_2B[instance_id][key] += 1
-                    
-                    # Check if we have a quorum (majority) for this value
-                    if self.quorum_2B[instance_id][key] >= self.majority_acceptors:
-                        if instance_id not in self.instance_buffer:
-                            self.instance_buffer[instance_id] = v_val
+                    if rnd == self.c_rnd:
+                        # Collect max_inst from each acceptor
+                        self.quorum_1B.append(max_inst)
+                        logging.debug(f"SIZE quorum_1B  {len(self.quorum_1B)}")
+                        
+                        if len(self.quorum_1B) == self.majority_acceptors:
+                            # 1. Discovery: Find the highest instance ID used by the cluster
+                            max_inst_global = max(self.quorum_1B)
                             
-                            if instance_id == self.global_next_seq:
-                                while self.global_next_seq in self.instance_buffer:
-                                    val = self.instance_buffer[self.global_next_seq]
-                                    self.deliver(val)
-                                    del self.instance_buffer[self.global_next_seq]
-                                    self.global_next_seq += 1
+                            # 2. Update local sequence to be next available slot
+                            next_instance = max(self.consensus_instance, max_inst_global + 1)
+                            
+                            # 3. Check if we have a value to propose
+                            if self.value is not None:
+                                # We have a value (batch), proceed with 2A
+                                self.consensus_instance = next_instance
+                                logging.debug(f"Proposing batch in instance: {self.consensus_instance}")
+                                c_val = self.value
+                                msg_2A = pickle.dumps(["2A", self.c_rnd, c_val, self.id, self.consensus_instance])
+                                self.s.sendto(msg_2A, self.config["acceptors"])
+                                logging.debug(f"Sending {pickle.loads(msg_2A)} to acceptors")
                             else:
-                                # Gap detection
-                                self.request_catchup(self.global_next_seq, instance_id - 1)
-                        
-                        # Clean up quorum tracking for this instance
-                        del self.quorum_2B[instance_id]
-                
-                case "Decision":
-                    v_val, instance_id = msg[1:]
+                                self.has_proactive_quorum = True
+                                self.proactive_consensus_instance_ = next_instance
+                                logging.debug(f"Proactive quorum ready for instance {next_instance}, waiting for value")
 
-                    if instance_id < self.global_next_seq:
-                        continue
+                case "2B":
+                    # Optimization: 2B messages go to both learners (for learning) and proposers (for flow control)
+                    v_rnd, v_val, id = msg[1:]
+                    if v_rnd == self.c_rnd and self.id == id:
+                        self.quorum_2B.append((v_rnd, v_val))
+                        logging.debug(f"SIZE quorum_2B {len(self.quorum_2B)}")
+                        if len(self.quorum_2B) == self.majority_acceptors:
+                            # Consensus reached - proposer can proceed to next value
+                            logging.debug(f"Consensus reached for instance {self.consensus_instance}")
+                            
+                            # Increment for next request
+                            self.consensus_instance += 1
 
-                    self.instance_buffer[instance_id] = v_val
-
-                    if instance_id == self.global_next_seq:
-                        while self.global_next_seq in self.instance_buffer:
-                            val = self.instance_buffer[self.global_next_seq]
-                            self.deliver(val)
-                            del self.instance_buffer[self.global_next_seq]
-                            self.global_next_seq += 1
-                    else:
-                        # Standard gap detection (during normal operation)
-                        self.request_catchup(self.global_next_seq, instance_id - 1)
-
-                case "LastInstanceResponse":
-                    # 2. Receive info about the highest instance existing in the cluster
-                    highest_instance_id = msg[1]
-                    logging.debug(f"Received LastInstanceResponse: {highest_instance_id} (My seq: {self.global_next_seq})")
-                    if highest_instance_id >= self.global_next_seq:
-                        # Trigger catchup for everything we are missing since startup
-                        self.request_catchup(self.global_next_seq, highest_instance_id)
-
-                case "CatchupResponse":
-                    instance_id, v_val = msg[1:]
+                            # Clear current value
+                            self.value = None
+                            
+                            # Optimization: Send proactive 1A for next instance even if queue is empty
+                            if self.queue:
+                                # Create next batch
+                                batch = self._create_batch()
+                                self.value = batch
+                                self.send_1A()
+                            else:
+                                # No value in queue, but send proactive 1A to prepare for future values
+                                self.send_1A()
+                                logging.debug("Sent proactive 1A (no value in queue)")
                     
-                    # Remove from pending
-                    self.catchup_pending.discard(instance_id)
-                    
-                    if instance_id >= self.global_next_seq and instance_id not in self.instance_buffer:
-                        self.instance_buffer[instance_id] = v_val
-                        
-                        while self.global_next_seq in self.instance_buffer:
-                            val = self.instance_buffer[self.global_next_seq]
-                            self.deliver(val)
-                            del self.instance_buffer[self.global_next_seq]
-                            self.global_next_seq += 1
+                case _:
+                    logging.error(f"Unknown message: {msg}")
+                    break
