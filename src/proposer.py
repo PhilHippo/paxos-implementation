@@ -17,23 +17,21 @@ class Proposer:
         self.value = None
         self.queue = deque()
         
-        # Global Sequence Number for Total Order
-        self.instance_seq = 0
+        # Global Sequence Number, needed for batching total order
+        self.consensus_instance = 0
 
-        # number of acceptors
-        self.majority_acceptors = math.ceil(self.config["n"]/2)
+        self.majority_acceptors = math.floor(self.config["n"]/2) + 1
         
-        # Proactive prepare optimization: track if we have quorum but no value
+        # Optimization to anticipate phase 1A quorum
         self.has_proactive_quorum = False
-        self.proactive_instance_seq = None
+        self.proactive_consensus_instance_ = None
 
     def send_1A(self, msg_num=None, client_id=None):
         self.c_rnd += 1
-        # reset quorums
         self.quorum_1B = []
         self.quorum_2B = []
         self.has_proactive_quorum = False
-        self.proactive_instance_seq = None
+        self.proactive_consensus_instance_ = None
 
         # For batching, we don't send msg_num/client_id in 1A (they're in the batch value)
         msg_1A = pickle.dumps(["1A", self.c_rnd, self.id])
@@ -70,21 +68,20 @@ class Proposer:
                         self.value = batch
                         
                         # Optimization: if we already have a proactive quorum, skip 1A and go directly to 2A
-                        if self.has_proactive_quorum and self.proactive_instance_seq is not None:
+                        if self.has_proactive_quorum and self.proactive_consensus_instance_ is not None:
                             # Use the instance_seq from the proactive prepare
-                            self.instance_seq = self.proactive_instance_seq
+                            self.consensus_instance = self.proactive_consensus_instance_ 
                             c_val = self.value
-                            msg_2A = pickle.dumps(["2A", self.c_rnd, c_val, self.id, self.instance_seq])
+                            msg_2A = pickle.dumps(["2A", self.c_rnd, c_val, self.id, self.consensus_instance])
                             self.s.sendto(msg_2A, self.config["acceptors"])
                             logging.debug(f"Sending {pickle.loads(msg_2A)} to acceptors (proactive optimization)")
                             # Reset proactive state
                             self.has_proactive_quorum = False
-                            self.proactive_instance_seq = None
+                            self.proactive_consensus_instance_ = None
                         else:
                             self.send_1A()
                         
                 case "1B":
-                    # Now receives only max_inst instead of full accepted_history
                     rnd, max_inst, id_a = msg[1:]
                     
                     if rnd == self.c_rnd:
@@ -97,21 +94,20 @@ class Proposer:
                             max_inst_global = max(self.quorum_1B)
                             
                             # 2. Update local sequence to be next available slot
-                            next_instance = max(self.instance_seq, max_inst_global + 1)
+                            next_instance = max(self.consensus_instance, max_inst_global + 1)
                             
                             # 3. Check if we have a value to propose
                             if self.value is not None:
                                 # We have a value (batch), proceed with 2A
-                                self.instance_seq = next_instance
-                                logging.debug(f"Proposing batch in instance: {self.instance_seq}")
+                                self.consensus_instance = next_instance
+                                logging.debug(f"Proposing batch in instance: {self.consensus_instance}")
                                 c_val = self.value
-                                msg_2A = pickle.dumps(["2A", self.c_rnd, c_val, self.id, self.instance_seq])
+                                msg_2A = pickle.dumps(["2A", self.c_rnd, c_val, self.id, self.consensus_instance])
                                 self.s.sendto(msg_2A, self.config["acceptors"])
                                 logging.debug(f"Sending {pickle.loads(msg_2A)} to acceptors")
                             else:
-                                # Optimization: We have quorum but no value yet - store for later
                                 self.has_proactive_quorum = True
-                                self.proactive_instance_seq = next_instance
+                                self.proactive_consensus_instance_ = next_instance
                                 logging.debug(f"Proactive quorum ready for instance {next_instance}, waiting for value")
 
                 case "2B":
@@ -122,10 +118,10 @@ class Proposer:
                         logging.debug(f"SIZE quorum_2B {len(self.quorum_2B)}")
                         if len(self.quorum_2B) == self.majority_acceptors:
                             # Consensus reached - proposer can proceed to next value
-                            logging.debug(f"Consensus reached for instance {self.instance_seq}")
+                            logging.debug(f"Consensus reached for instance {self.consensus_instance}")
                             
                             # Increment for next request
-                            self.instance_seq += 1
+                            self.consensus_instance += 1
 
                             # Clear current value
                             self.value = None

@@ -25,7 +25,8 @@ class Client:
                 start_time = time.perf_counter()
 
             logging.debug(f"client: sending {value} to proposers")
-            self.s.sendto(value, self.config["proposers"])
+            self.s.sendto(value, self.config["proposers"]) 
+            # send to proposers the message : ["client", value, msg_num, client_id]
             
             if self.measuring:
                 msg, addr = self.r.recvfrom(2**16)
