@@ -118,7 +118,8 @@ class Learner:
         logging.debug("Querying acceptors for latest instance ID...")
         query_msg = pickle.dumps(["QueryLastInstance"])
         self.s.sendto(query_msg, self.config["acceptors"])
-
+        last_msg_time = time.time()
+        
         while True:
             # Use select with shorter timeout for more aggressive retry
             ready = select.select([self.r], [], [], 0.1)
@@ -126,10 +127,17 @@ class Learner:
             if not ready[0]:
                 # Timeout - retry missing catchup
                 self.retry_missing_catchup()
+                
+                # If we have not received anything for 0.5s, re-query latest instance to trigger catchup
+                now = time.time()
+                if now - last_msg_time >= 0.5:
+                    self.s.sendto(query_msg, self.config["acceptors"])
+                    last_msg_time = now
                 continue
             
             msg, addr = self.r.recvfrom(2**16)
             msg = pickle.loads(msg)
+            last_msg_time = time.time()
 
             match msg[0]:
                 case "2B":
