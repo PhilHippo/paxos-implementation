@@ -203,12 +203,6 @@ class Learner:
             
             if not ready[0]:
                 self.retry_missing_catchup()
-                
-                # Re-query if no messages for 0.5s
-                now = time.time()
-                if now - last_msg_time >= 0.5:
-                    self.s.sendto(query_msg, self.config["acceptors"])
-                    last_msg_time = now
                 continue
             
             msg, addr = self.r.recvfrom(2**16)
@@ -223,4 +217,16 @@ class Learner:
                 case "LastInstanceResponse":
                     self._handle_last_instance_response(msg)
                 case "CatchupResponse":
-                    self._handle_catchup_response(msg)
+                    instance_id, v_val = msg[1:]
+                    
+                    # Remove from pending
+                    self.catchup_pending.discard(instance_id)
+                    
+                    if instance_id >= self.global_next_seq and instance_id not in self.instance_buffer:
+                        self.instance_buffer[instance_id] = v_val
+                        
+                        while self.global_next_seq in self.instance_buffer:
+                            val = self.instance_buffer[self.global_next_seq]
+                            self.deliver(val)
+                            del self.instance_buffer[self.global_next_seq]
+                            self.global_next_seq += 1
