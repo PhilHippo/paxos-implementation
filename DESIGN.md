@@ -1,58 +1,157 @@
-# Multi-Paxos Implementation (IP Multicast)
+# Multi-Paxos Design Document
 
-The system assumes an asynchronous network with crash failures and uses IP multicast for all roles.
+This document describes the design decisions and implementation details of the Multi-Paxos consensus system.
+
+## System Model
+
+The system assumes:
+- **Asynchronous network**: No timing guarantees on message delivery
+- **Crash failures**: Nodes may fail by crashing (no Byzantine faults)
+- **IP Multicast**: All communication uses UDP multicast groups
 
 ## Roles and Responsibilities
-- Clients: submit user values to proposers
-- Proposers: coordinate rounds, batch client requests, and skip 1A with proactive prepares.
-- Acceptors: maintain accepted instance history, respond to prepares, and multicast accepts to learners and proposers.
-- Learners: collect 2B votes, detect quorums, deliver ordered values, and catch up missing instances.
+
+### Clients
+- Submit user values to proposers via multicast
+- Optionally measure end-to-end latency by listening for learned values
+
+### Proposers
+- Coordinate Paxos rounds (Phase 1A and Phase 2A)
+- Batch multiple client requests into single consensus instances
+- Implement proactive prepare optimization to reduce latency
+
+### Acceptors
+- Maintain promise state (`rnd`) and accepted history per instance
+- Respond to prepare requests (1A → 1B)
+- Accept proposals and multicast accepts to learners and proposers (2A → 2B)
+- Support catch-up queries from learners
+
+### Learners
+- Collect 2B votes and detect quorums (majority of acceptors)
+- Maintain delivery buffer for total order guarantee
+- Perform catch-up recovery for missing instances
 
 ## Message Types
-- `client`: client → proposers; payload `(value, msg_num, client_id)`.
-- `1A`: proposer → acceptors; payload `(c_rnd, proposer_id)`.
-- `1B`: acceptor → proposers; payload `(rnd, max_inst, proposer_id)` where `max_inst` is highest instance the acceptor knows.
-- `2A`: proposer → acceptors; payload `(c_rnd, c_val, proposer_id, instance_id)`.
-- `2B` to learners and proposers: acceptor → learners; payload `(v_rnd, v_val, instance_id)`.
-- Catchup: `QueryLastInstance` / `LastInstanceResponse` and `Catchup` / `CatchupResponse` between learners and acceptors.
 
-## Proposer (batched Multi-Paxos)
-- Batching: incoming client tuples are queued; `_create_batch` pulls up to `batch_size`. A batch is the value proposed for one instance.
-- Instance numbering: `instance_seq` tracks the global sequence; 1B replies provide `max_inst` to pick `next_instance = max(local, max_inst+1)`.
-- Proactive prepare optimization: if a quorum of 1B is acquired before a value arrives, the proposer records `proactive_instance_seq` and later skips a new 1A, going straight to 2A for the stored instance.
-- Flow:
-  1. On first value (or after consensus), send 1A unless a proactive quorum exists.
-  2. Upon majority 1B, if a value exists, send 2A with chosen instance id; else mark proactive quorum and wait for value.
-  3. On majority 2B (matching `c_rnd` and proposer id), advance `instance_seq`, clear current value, and immediately send another 1A (proactive) whether or not a new batch is queued.
-- Majority size: `⌊n/2⌋ + 1` acceptors.
+| Message | Direction | Payload |
+|---------|-----------|---------|
+| `client` | Client → Proposers | `(value, msg_num, client_id)` |
+| `1A` | Proposer → Acceptors | `(c_rnd, proposer_id)` |
+| `1B` | Acceptor → Proposers | `(rnd, max_inst, proposer_id)` |
+| `2A` | Proposer → Acceptors | `(c_rnd, c_val, proposer_id, instance_id)` |
+| `2B` | Acceptor → Learners/Proposers | `(v_rnd, v_val, instance_id)` |
+| `QueryLastInstance` | Learner → Acceptors | - |
+| `LastInstanceResponse` | Acceptor → Learners | `(highest_instance_id)` |
+| `Catchup` | Learner → Acceptors | `(instance_id)` |
+| `CatchupResponse` | Acceptor → Learners | `(instance_id, value)` |
 
-## Acceptor
-- State: `rnd` (promise) and `accepted_history` keyed by `instance_id` storing `(v_rnd, v_val)`.
-- 1A handling: if `c_rnd` is higher, update `rnd` and reply with `1B` carrying only `max_inst` to reduce traffic.
-- 2A handling: if `c_rnd >= rnd`, record acceptance and multicast 2B to both learners and proposers.
-- Catchup support: respond to `Catchup` with the accepted value for that instance; respond to `QueryLastInstance` with highest known instance id.
+## Protocol Flow
 
-## Learner
-- Quorum tracking: per-instance map from `(v_rnd, v_val)` to vote counts; quorum is majority of acceptors.
-- Delivery buffer: `instance_buffer` where keys are instance id; `global_next_seq` is the next required instance for total order delivery.
-- Catchup and gap recovery:
-  - On start, send `QueryLastInstance` to acceptors.
-  - On receiving `LastInstanceResponse`, request catchup for missing instances in range.
-  - `request_catchup` batches `Catchup` requests with rate limiting; `retry_missing_catchup` periodically resends outstanding gaps.
-  - `CatchupResponse` inserts missing instance values, triggers in-order drain of `instance_buffer`.
-- Decision handling: also accepts `Decision` messages containing `(v_val, instance_id)` and uses the same in-order delivery path.
+### Normal Operation
 
+```
+Client          Proposer        Acceptor        Learner
+   |                |               |               |
+   |---[client]---->|               |               |
+   |                |----[1A]------>|               |
+   |                |<---[1B]-------|               |
+   |                |----[2A]------>|               |
+   |                |<---[2B]-------|---[2B]------->|
+   |                |               |               |
+```
+
+### With Proactive Prepare (Optimization)
+
+```
+Client          Proposer        Acceptor        Learner
+   |                |               |               |
+   |                |----[1A]------>|  (proactive)  |
+   |                |<---[1B]-------|               |
+   |---[client]---->|               |               |
+   |                |----[2A]------>|  (skip 1A!)   |
+   |                |<---[2B]-------|---[2B]------->|
+```
 
 ## Key Optimizations
-- Proactive prepares: proposers keep a ready quorum so that when a value arrives they can jump directly to 2A.
-- Reduced 1B payload: acceptors send only `max_inst`, not the full history.
-- Dual 2B multicast: acceptors send 2B to learners (learning shortcut) and proposers (flow control and pipelining).
-- Catchup: learners continuously detect gaps and rate-limit batched catchup requests.
-- Batching of client requests: proposer batches up to `batch_size` requests as one Paxos value to increase throughput.
 
+### 1. Request Batching
 
-## Difficulties and Resolutions
-- Implementing Synod by vibe code was confusing; following the reference slides step by step clarified the protocol and made the basic Paxos flow work.
-- Understanding Multi-Paxos needed a discussion with colleagues; in the end a proposer-side queue of client messages and pop batches as they are proposed, while acceptors clear their `v_val` after each acceptance to prepare for the next instance.
-- Running the same experiment parameters on different laptops produced divergent results (not all values learned); some machines required larger sleep (`-s`) delays.
+Proposers accumulate client requests and propose them as a single batch value:
 
+- Configurable batch size via `-b` flag
+- Reduces number of consensus instances needed
+- Batch is the atomic unit for each Paxos instance
+
+### 2. Proactive Prepares
+
+After completing a consensus round, proposers immediately send a new 1A:
+
+- If a quorum responds before the next client request arrives, the proposer can skip 1A
+- Reduces latency from 4 message delays to 2 for subsequent requests
+- Stores `proactive_instance_seq` to track the reserved instance slot
+
+### 3. Reduced 1B Payload
+
+Traditional Paxos sends full accepted history in 1B. Our optimization:
+
+- Acceptors only send `max_inst` (highest known instance ID)
+- Proposers use this to compute next available slot: `max(local, max_inst + 1)`
+- Significantly reduces 1B message size
+
+### 4. Dual 2B Multicast
+
+Acceptors send 2B to both learners and proposers:
+
+- **Learners**: Learn values directly (saves one message hop)
+- **Proposers**: Flow control - know when to proceed to next request
+
+## Learner Catch-up Mechanism
+
+### Bootstrap Recovery
+
+1. On startup, learner sends `QueryLastInstance` to acceptors
+2. Receives `LastInstanceResponse` with highest known instance
+3. Requests catch-up for all instances from 0 to highest
+
+### Gap Detection
+
+During normal operation, if learner receives instance N but expects instance M (where M < N):
+
+1. Buffer instance N
+2. Request catch-up for instances M to N-1
+3. Deliver values in order once gaps are filled
+
+### Rate-Limited Retries
+
+- Batch catch-up requests in groups of 200
+- Small delays between batches to prevent network flooding
+- Periodic retry (every 100ms) for outstanding requests
+
+## Quorum Requirements
+
+- **Majority**: `⌊n/2⌋ + 1` acceptors (where n = total acceptors)
+- Same quorum size used for both Phase 1 and Phase 2
+- Ensures any two quorums have at least one common member
+
+## Total Order Delivery
+
+Learners guarantee total order delivery using:
+
+1. **Instance buffer**: Maps instance_id → value
+2. **Global sequence**: Tracks next expected instance for delivery
+3. **In-order drain**: Only delivers when consecutive instances are available
+
+```python
+while global_next_seq in instance_buffer:
+    deliver(instance_buffer[global_next_seq])
+    del instance_buffer[global_next_seq]
+    global_next_seq += 1
+```
+
+## Client-Level Deduplication
+
+Within each batch, values are tagged with `(msg_num, client_id)`:
+
+- Learners maintain per-client sequence numbers
+- Values delivered in client-order within total consensus order
+- Handles cases where same value appears in multiple batches

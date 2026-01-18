@@ -1,41 +1,58 @@
-import sys
+"""
+Paxos Client implementation.
+
+The client reads values from stdin and submits them to proposers.
+Optionally measures end-to-end latency by listening for learned values.
+"""
+
 import logging
-import time
-from utils import mcast_sender, mcast_receiver
 import pickle
+import sys
+import time
+
+from utils import mcast_sender, mcast_receiver
+
 
 class Client:
-    def __init__(self, config, id):
+    def __init__(self, config, node_id):
         self.config = config
-        self.id = id
-        self.s = mcast_sender()
-        self.r = mcast_receiver(config["learners"])
+        self.id = node_id
         self.msg_num = 0
         
-        self.output_file = f"logs/latency_client{self.id}"
+        # Network
+        self.s = mcast_sender()
+        self.r = mcast_receiver(config["learners"])
+        
+        # Latency measurement
         self.measuring = True
+        self.output_file = f"logs/latency_client{self.id}"
 
     def run(self):
-        logging.debug(f"-> client {self.id}")
-        for value in sys.stdin:
-            value = pickle.dumps(["client", value.strip(), self.msg_num, self.id])
-            self.msg_num += 1
-
-            if self.measuring:
-                start_time = time.perf_counter()
-
-            logging.debug(f"client: sending {value} to proposers")
-            self.s.sendto(value, self.config["proposers"])
+        """Read values from stdin and submit to proposers."""
+        logging.debug(f"Client {self.id} started")
+        
+        for line in sys.stdin:
+            value = line.strip()
+            msg = pickle.dumps(["client", value, self.msg_num, self.id])
             
             if self.measuring:
-                msg, addr = self.r.recvfrom(2**16)
+                start_time = time.perf_counter()
+            
+            self.s.sendto(msg, self.config["proposers"])
+            logging.debug(f"Sent value: {value}, msg_num={self.msg_num}")
+            self.msg_num += 1
+            
+            if self.measuring:
+                # Wait for the value to be learned
+                response, addr = self.r.recvfrom(2**16)
                 
                 end_time = time.perf_counter()
-                latency = (end_time - start_time) * 1_000_000 # us
+                latency_us = (end_time - start_time) * 1_000_000
+                
                 with open(self.output_file, "a") as f:
-                    f.write(f"{latency:.6f}\n")
+                    f.write(f"{latency_us:.6f}\n")
                 
-                print(pickle.loads(msg))
+                print(pickle.loads(response))
                 sys.stdout.flush()
-                
-        logging.debug("client done.")
+        
+        logging.debug("Client finished")

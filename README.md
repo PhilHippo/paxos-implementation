@@ -1,60 +1,246 @@
-# Distributed Algorithms: Paxos implementation
+# Multi-Paxos: Atomic Broadcast Implementation
 
-The implementation is accomplished through three milestones:
-1) Synod algorithm
-2) Multi Paxos
-3) Optimizations
+An implementation of the Paxos consensus protocol for solving **atomic broadcast** - the problem of having a set of processes agree on a sequence of totally ordered values in an asynchronous distributed system.
 
-## Dependencies and preliminaries
+## Project Overview
 
-The bash scripts can be runned from a clean Ubuntu 24.04 image. You may need `sudo` access to run the scripts.
+Paxos is a protocol used to solve consensus in asynchronous systems. While basic consensus allows processes to agree on a single value, this implementation extends Paxos to support **atomic broadcast**, where processes agree on a sequence of totally ordered values.
 
-Some of the scripts use `iptables` to simulate message loss through firewall rules. Adding these rules on your local machine is risky, as they greatly impact the performance of the network communication. The suggestion is to run everything inside a virtual machine (e.g., with `multipass`).
+### Roles
 
-Depending on the network interface used, ip multicast might not be enabled. You can check using `ifconfig` and checking that the "MULTICAST" flag is set. You *might* have to enable it using:
+The implementation provides four distinct roles communicating via IP multicast:
+
+| Role | Responsibility |
+|------|----------------|
+| **Clients** | Submit values to proposers |
+| **Proposers** | Coordinate Paxos rounds to propose values to be decided |
+| **Acceptors** | Paxos acceptors that vote on proposals |
+| **Learners** | Learn about the sequence of values as they are decided |
+
+### Architecture
 
 ```
-ifconfig IFACE multicast
+┌─────────┐     ┌───────────┐     ┌───────────┐     ┌─────────┐
+│ Clients │────▶│ Proposers │────▶│ Acceptors │────▶│ Learners│
+└─────────┘     └───────────┘     └───────────┘     └─────────┘
+                     │                  │                │
+                     └──────────────────┴────────────────┘
+                           IP Multicast Groups
 ```
 
-where `IFACE` is the name of the interface. Using a connected cable/wifi interface probably will not have this problem (e.g. "eth0", "wlan0").
+## Implementation Milestones
 
-## How to run the tests
+### 1. Synod Algorithm
+The basic version of Paxos supporting the decision of a **single value**.
 
-1. `cd` to this directory. All the scripts should be run from here. Make sure the scripts in the `scripts` folder have executable permissions.
+### 2. Multi-Paxos
+Extension of the Synod algorithm to support **atomic broadcast** - the decision of multiple values in the same total order.
 
-2. Permorm a run and check the results as follows:
+### 3. Optimizations
+
+| Optimization | Description |
+|--------------|-------------|
+| **Direct 2B to Learners** | Acceptors send Phase 2B messages directly to learners, saving one communication step |
+| **Proactive Phase 1** | Proposers perform Phase 1 before receiving values from clients, saving two communication steps on the critical path |
+| **Batching** | Multiple values can be decided in a single Synod instance, improving throughput |
+
+## Safety and Liveness Guarantees
+
+### Safety (Always Guaranteed)
+- **Total Order**: All learners deliver values in the same order
+- **Agreement**: All learners eventually learn the same set of values  
+- **Integrity**: Only values proposed by clients are learned
+
+**Message loss or process crashes never violate safety.**
+
+### Liveness
+- If a **majority of acceptors** are alive, progress can be made
+- Learning values is possible with a majority of acceptors and at least one of each other role (no crashes or message loss)
+- Multiple proposers are supported; if two proposers conflict, they will keep trying until one succeeds
+
+> **Note**: This implementation does not include leader election. No assumptions are made about which proposer is the leader.
+
+## Failure Model
+
+The implementation assumes **crash failures**:
+- Processes fail by halting and do not recover
+- No Byzantine faults
+- All state is kept in memory (no stable storage needed)
+- No recovery procedure for acceptors or learners
+
+## Communication Model
+
+- **Asynchronous network**: No timing guarantees on message delivery
+- **IP Multicast only**: Four separate multicast groups (one per role)
+- **No synchrony**: No use of `time.sleep()` or similar timing mechanisms in the protocol
+
+## Prerequisites
+
+- Ubuntu 24.04 (or compatible Linux distribution)
+- Python 3.10+
+- `jq` (for config generation): `sudo apt install jq`
+- `gnuplot` (optional, for latency plots): `sudo apt install gnuplot`
+- Network interface with multicast enabled
+
+### Enabling Multicast
+
+Check if multicast is enabled on your interface:
+
+```bash
+ifconfig
 ```
-scripts/run.sh -n 1000
+
+Look for the `MULTICAST` flag. If missing, enable it:
+
+```bash
+sudo ifconfig <INTERFACE> multicast
+```
+
+> **Note**: Running in a virtual machine (e.g., Multipass) is recommended as some scripts use `iptables` to simulate message loss.
+
+## Quick Start
+
+1. Clone the repository and navigate to the project directory:
+
+```bash
+git clone https://github.com/yourusername/paxos-implementation.git
+cd paxos-implementation
+```
+
+2. Make scripts executable:
+
+```bash
+chmod +x scripts/*.sh
+```
+
+3. Run a basic test:
+
+```bash
+scripts/run.sh -n 100
 scripts/check.sh
 ```
 
-3. Once `gnuplot` is installed with `sudo apt install gnuplot`, you can collect latency data and plot it with the following commands:
+## Usage
+
+### Running the System
+
+```bash
+scripts/run.sh [OPTIONS]
 ```
+
+**Options:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-n, --num NUM` | Number of values per client | 5 |
+| `-b, --batch NUM` | Batch size for proposers | 1 |
+| `-c, --clients NUM` | Number of clients | 2 |
+| `-p, --proposers NUM` | Number of proposers | 2 |
+| `-a, --acceptors NUM` | Number of acceptors | 3 |
+| `-l, --learners NUM` | Number of learners | 2 |
+| `--loss RATE` | Packet loss probability (0.0-1.0) | 0.0 |
+| `--catchup` | Start learner late to test catch-up | - |
+| `-s, --sleep SEC` | Sleep duration between phases | 2 |
+| `--ip ADDRESS` | Multicast IP address | 239.1.2.3 |
+| `-d, --debug` | Enable debug logging | - |
+
+### Examples
+
+Run with 1000 values per client:
+
+```bash
+scripts/run.sh -n 1000
+```
+
+Test with 10% packet loss (safety must still hold):
+
+```bash
+scripts/run.sh -n 100 --loss 0.1
+```
+
+Test learner catch-up:
+
+```bash
+scripts/run.sh -n 500 --catchup
+```
+
+Use batching for higher throughput:
+
+```bash
+scripts/run.sh -n 1000 -b 10
+```
+
+### Verifying Results
+
+```bash
+scripts/check.sh
+```
+
+This verifies:
+1. **Total Order**: All learners agree on the same ordered sequence
+2. **Integrity**: All learned values were actually proposed
+3. **Agreement**: All proposed values were learned
+
+### Generating Latency Plots
+
+```bash
 scripts/run.sh -n 1000 -l 0
 gnuplot scripts/plotting/cdf.gp
 gnuplot scripts/plotting/cartesian.gp
 ```
-These will generate the two plots in the logs folder. Not that clients need to learn the values to compute the latencies. Reset the corresponding flag in the client to disable this feature: then, only the learners will learn.
 
-## Caveats/Tips
+Plots are saved to `logs/plot_cdf.pdf` and `logs/plot_cartesian.pdf`.
 
-1. The scripts will try to `pkill` your processes (SIGTERM). You might need to "flush" the output of your learners to make sure values are printed when learned.
+## Troubleshooting
 
-2. The output of your "learners" should be **ONLY** the values learned, one per line. Anything else will fail the checks.
+**Processes still running after Ctrl+C:**
 
-3. The scripts have many parameters to test for different cases:
-    - `-n X` allows each client to generate `X` values
-    - `-d` enables debug
-    - `--loss X` drops `X`% (e.g., `0.1`) of sent messages
-    - `--catchup` starts a late learner to test catchup
-    - `-s` sets the sleep time used in the scripts: it may be increased if a lot of values are sent
-    - `--ip` changes the default multicast ip address (`239.1.2.3`)
-    - `-c` sets the number of clients
-    - `-p` sets the number of proposers
-    - `-a` sets the number of acceptors
-    - `-l` sets the number of learners
+```bash
+scripts/cleanup.sh
+```
 
-4. In case you specify a loss probability and kill the script, you may need to manually remove the firewall rule. Run `scripts/cleanup.sh` to cleanup. You can check the active rules with `sudo iptables -L INPUT -v --line-numbers`.
+**Firewall rules blocking multicast:**
 
-5. If you started a run, but then you stopped it with `Ctrl+C`, it is a good idea to close the current terminal and reopen another one, since some processes may still be running and they may still send/receive messages for a new run.
+```bash
+sudo iptables -L INPUT -v --line-numbers
+scripts/cleanup.sh
+```
+
+**Not all values learned:**
+
+- Increase sleep time: `scripts/run.sh -s 5 -n 1000`
+- Check if multicast is enabled on your network interface
+
+## Project Structure
+
+```
+.
+├── src/
+│   ├── main.py        # Entry point and argument parsing
+│   ├── client.py      # Client: submits values to proposers
+│   ├── proposer.py    # Proposer: coordinates Paxos rounds (Phase 1A/2A)
+│   ├── acceptor.py    # Acceptor: votes on proposals (Phase 1B/2B)
+│   ├── learner.py     # Learner: learns decided values in total order
+│   └── utils.py       # Multicast socket utilities
+├── scripts/
+│   ├── run.sh         # Main execution script
+│   ├── check.sh       # Verification script (safety checks)
+│   ├── cleanup.sh     # Process/firewall cleanup
+│   └── plotting/      # Gnuplot scripts for latency analysis
+├── DESIGN.md          # Detailed design documentation
+├── LICENSE            # MIT License
+└── README.md
+```
+
+## Design Details
+
+See [DESIGN.md](DESIGN.md) for detailed information about:
+
+- Message types and protocol flow
+- Batching and proactive prepare optimizations
+- Learner catch-up mechanism
+- Quorum requirements and total order delivery
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.

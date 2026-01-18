@@ -1,0 +1,17 @@
+# Multi-Paxos Implementation
+# 
+# This project uses only Python standard library modules.
+# No external dependencies required.
+#
+# Minimum Python version: 3.10 (for match/case syntax)
+#
+# Standard library modules used:
+# - socket, struct (multicast communication)
+# - pickle (message serialization)
+# - json (config loading)
+# - argparse (CLI parsing)
+# - logging (debug output)
+# - select (async I/O)
+# - collections (deque)
+# - math (quorum calculation)
+# - time, sys, os (utilities)
