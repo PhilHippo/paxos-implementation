@@ -196,6 +196,7 @@ class Learner:
         query_msg = pickle.dumps(["QueryLastInstance"])
         self.s.sendto(query_msg, self.config["acceptors"])
         last_msg_time = time.time()
+
         
         while True:
             # Use select with timeout for catch-up retries
@@ -203,6 +204,13 @@ class Learner:
             
             if not ready[0]:
                 self.retry_missing_catchup()
+                
+                # If we have not received anything for 0.5s, re-query latest instance to trigger catchup
+                now = time.time()
+                if now - last_msg_time >= 0.5:
+                    self.s.sendto(query_msg, self.config["acceptors"])
+                    last_msg_time = now
+                
                 continue
             
             msg, addr = self.r.recvfrom(2**16)
@@ -217,16 +225,4 @@ class Learner:
                 case "LastInstanceResponse":
                     self._handle_last_instance_response(msg)
                 case "CatchupResponse":
-                    instance_id, v_val = msg[1:]
-                    
-                    # Remove from pending
-                    self.catchup_pending.discard(instance_id)
-                    
-                    if instance_id >= self.global_next_seq and instance_id not in self.instance_buffer:
-                        self.instance_buffer[instance_id] = v_val
-                        
-                        while self.global_next_seq in self.instance_buffer:
-                            val = self.instance_buffer[self.global_next_seq]
-                            self.deliver(val)
-                            del self.instance_buffer[self.global_next_seq]
-                            self.global_next_seq += 1
+                    self._handle_catchup_response(msg)
