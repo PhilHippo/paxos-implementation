@@ -33,6 +33,36 @@ The implementation provides four distinct roles communicating via IP multicast:
 ### 1. Synod Algorithm
 The basic version of Paxos supporting the decision of a **single value**.
 
+#### Protocol Overview
+
+The Synod algorithm consists of two phases:
+
+![Synod Paxos Protocol](docs/images/synod_paxos.png)
+
+*The complete Synod (single-decree Paxos) protocol showing both phases and all message types.*
+
+#### Phase 1: Prepare
+
+![Phase 1](docs/images/Phase_1.png)
+
+*Phase 1 (Prepare): The proposer sends a prepare request with round number `c-rnd`. Acceptors respond with their highest accepted round and value.*
+
+#### Phase 2: Accept
+
+![Phase 2](docs/images/Phase2.png)
+
+*Phase 2 (Accept): The proposer sends an accept request. Acceptors accept if the round number is valid and notify learners.*
+
+#### Notation
+
+| Symbol | Meaning |
+|--------|---------|
+| `c-rnd` | Proposer's current round number |
+| `rnd` | Acceptor's highest promised round |
+| `v-rnd` | Round in which acceptor last accepted a value |
+| `v-val` | Value the acceptor last accepted |
+| `c-val` | Value the proposer is trying to get accepted |
+
 ### 2. Multi-Paxos
 Extension of the Synod algorithm to support **atomic broadcast** - the decision of multiple values in the same total order.
 
@@ -215,6 +245,11 @@ scripts/cleanup.sh
 
 ```
 .
+├── docs/
+│   └── images/        # Protocol diagrams
+│       ├── synod_paxos.png
+│       ├── Phase_1.png
+│       └── Phase2.png
 ├── src/
 │   ├── main.py        # Entry point and argument parsing
 │   ├── client.py      # Client: submits values to proposers
